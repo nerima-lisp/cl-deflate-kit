@@ -11,7 +11,7 @@
       formatter = each (system: pkgs: pkgs.nixfmt-tree);
       packages = each (system: pkgs: { default = pkgs.stdenvNoCC.mkDerivation {
         pname = "cl-deflate-kit"; version = "0.1.0"; src = self; dontBuild = true;
-        installPhase = ''mkdir -p $out/share/common-lisp/source/cl-deflate-kit; cp -r *.asd *.lisp t README.md LICENSE $out/share/common-lisp/source/cl-deflate-kit/'';
+        installPhase = ''mkdir -p $out/share/common-lisp/source/cl-deflate-kit; cp -r *.asd src t README.md LICENSE $out/share/common-lisp/source/cl-deflate-kit/'';
         meta.license = pkgs.lib.licenses.mit;
       }; });
       devShells = each (system: pkgs: { default = pkgs.mkShell { packages = [ pkgs.sbcl cl-weave.packages.${system}.default pkgs.coreutils ]; }; });

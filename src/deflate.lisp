@@ -1,0 +1,315 @@
+;;; A small, dependency-free RFC 1951 encoder.
+
+(in-package #:deflate-kit)
+
+(define-condition invalid-compression-level (deflate-error)
+  ((level :initarg :level :reader invalid-compression-level-level))
+  (:report (lambda (c s)
+            (format s "Invalid DEFLATE compression level ~S."
+                    (invalid-compression-level-level c)))))
+(define-condition deflater-finished-error (deflate-error)
+  () (:report (lambda (c s) (declare (ignore c))
+                (write-string "The DEFLATE stream has already been finished." s))))
+(export '(make-deflater deflater-write deflater-flush deflater-finish
+          deflater-output deflater-level invalid-compression-level
+          invalid-compression-level-level deflater-finished-error))
+
+(defstruct (bit-writer (:constructor %make-bit-writer))
+  (bytes (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+  (bit-buffer 0 :type (unsigned-byte 32))
+  (bit-count 0 :type fixnum))
+
+(defun %write-bits (w value count)
+  (setf (bit-writer-bit-buffer w)
+        (logior (bit-writer-bit-buffer w) (ash value (bit-writer-bit-count w)))
+        (bit-writer-bit-count w) (+ count (bit-writer-bit-count w)))
+  (loop while (>= (bit-writer-bit-count w) 8) do
+    (vector-push-extend (logand #xff (bit-writer-bit-buffer w))
+                        (bit-writer-bytes w))
+    (setf (bit-writer-bit-buffer w) (ash (bit-writer-bit-buffer w) -8)
+          (bit-writer-bit-count w) (- (bit-writer-bit-count w) 8)))
+  w)
+
+(defun %align (w)
+  (when (plusp (bit-writer-bit-count w))
+    (%write-bits w 0 (- 8 (mod (bit-writer-bit-count w) 8))))
+  w)
+
+(defun %finish-bits (w)
+  (%align w)
+  (copy-seq (bit-writer-bytes w)))
+
+(defun %reverse-bits (value count)
+  (loop with result = 0
+        repeat count do (setf result (logior (ash result 1) (logand value 1))
+                                  value (ash value -1))
+        finally (return result)))
+
+(defun %canonical-codes (lengths)
+  (let ((max-length (reduce #'max lengths :initial-value 0))
+        (counts (make-array 16 :initial-element 0))
+        (next (make-array 16 :initial-element 0))
+        (codes (make-array (length lengths) :initial-element 0)))
+    (loop for n across lengths when (plusp n) do (incf (aref counts n)))
+    (loop for bits from 1 to max-length
+          do (setf (aref next bits)
+                   (ash (+ (aref next (1- bits)) (aref counts (1- bits))) 1)))
+    (loop for i below (length lengths)
+          for n = (aref lengths i) when (plusp n) do
+            (setf (aref codes i) (%reverse-bits (aref next n) n))
+            (incf (aref next n)))
+    codes))
+
+(defparameter +length-bases+ #(3 4 5 6 7 8 9 10 11 13 15 17 19 23 27 31 35 43 51 59 67 83 99 115 131 163 195 227 258))
+(defparameter +length-extra+ #(0 0 0 0 0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 0))
+(defparameter +distance-bases+ #(1 2 3 4 5 7 9 13 17 25 33 49 65 97 129 193 257 385 513 769 1025 1537 2049 3073 4097 6145 8193 12289 16385 24577))
+(defparameter +distance-extra+ #(0 0 0 0 1 1 2 2 3 3 4 4 5 5 6 6 7 7 8 8 9 9 10 10 11 11 12 12 13 13))
+
+(defun %symbol-for (value bases)
+  (loop for i from 0 below (1- (length bases))
+        when (< value (aref bases (1+ i))) do (return i)
+        finally (return (1- (length bases)))))
+
+(defun %huffman-lengths (frequencies max-length)
+  (let* ((n (length frequencies))
+         (used (loop for i below n when (plusp (aref frequencies i)) collect i)))
+    (when (= (length used) 1)
+      (let ((extra (if (zerop (first used)) 1 0)))
+        (push extra used)))
+    (when (null used) (return-from %huffman-lengths (make-array n :initial-element 0)))
+    (let ((nodes (mapcar (lambda (i) (list (aref frequencies i) i nil)) used)))
+      (loop while (> (length nodes) 1) do
+        (setf nodes (sort nodes (lambda (a b)
+                                 (or (< (first a) (first b))
+                                     (and (= (first a) (first b))
+                                          (< (or (second a) most-positive-fixnum)
+                                             (or (second b) most-positive-fixnum)))))))
+        (let ((a (pop nodes)) (b (pop nodes)))
+          (push (list (+ (first a) (first b)) nil (list a b)) nodes)))
+      (let ((tree-lengths (make-array n :initial-element 0))
+            (counts (make-array (1+ max-length) :initial-element 0)))
+        (labels ((walk (node depth)
+                   (if (third node)
+                       (dolist (child (third node)) (walk child (1+ depth)))
+                       (setf (aref tree-lengths (second node)) depth))))
+          (walk (first nodes) 0))
+        (loop for x across tree-lengths when (> x max-length) do (incf (aref counts max-length))
+              else when (plusp x) do (incf (aref counts x)))
+        (let ((overflow (loop for x across tree-lengths count (> x max-length))))
+          (loop while (> overflow 0) do
+            (loop for bits downfrom (1- max-length) to 1
+                  when (plusp (aref counts bits)) do
+                    (decf (aref counts bits))
+                    (incf (aref counts (1+ bits)) 2)
+                    (decf (aref counts max-length))
+                    (decf overflow 2)
+                    (return))))
+        (let ((ordered (sort (copy-list used)
+                             (lambda (a b)
+                               (or (< (aref frequencies a) (aref frequencies b))
+                                   (and (= (aref frequencies a) (aref frequencies b)) (> a b)))))))
+          (let ((at 0))
+            (loop for bits downfrom max-length to 1 do
+              (dotimes (i (aref counts bits))
+                (setf (aref tree-lengths (nth at ordered)) bits)
+                (incf at))))
+        tree-lengths)))))
+
+(defun %fixed-tables ()
+  (values (%canonical-codes
+           (concatenate 'vector (make-array 144 :initial-element 8)
+                        (make-array 112 :initial-element 9)
+                        (make-array 24 :initial-element 7)
+                        (make-array 8 :initial-element 8)))
+          (make-array 288 :initial-element 0)))
+
+(defun %fixed-lengths ()
+  (let ((a (make-array 288 :initial-element 0)) (b (make-array 32 :initial-element 5)))
+    (loop for i below 144 do (setf (aref a i) 8))
+    (loop for i from 144 below 256 do (setf (aref a i) 9))
+    (loop for i from 256 below 280 do (setf (aref a i) 7))
+    (loop for i from 280 below 288 do (setf (aref a i) 8))
+    (values a b)))
+
+(defun %coerce-octets (data)
+  (etypecase data
+    ((vector (unsigned-byte 8)) data)
+    (string (let ((v (make-array (length data) :element-type '(unsigned-byte 8))))
+              (loop for i below (length data) do (setf (aref v i) (char-code (char data i)))) v))
+    (list (coerce data '(vector (unsigned-byte 8))))))
+
+(defstruct (token (:constructor %token (literal distance length))) literal distance length)
+
+(defun %tokens (data start end level)
+  (loop with result = nil
+        with i = start
+        with candidate-limit = (ecase level
+                                 (0 0) (1 8) ((2 3) 32) ((4 5) 64)
+                                 ((6 7) 128) ((8 9) 256))
+        while (< i end)
+        do (let ((best 0) (distance 0) (seen 0))
+             (when (and (> candidate-limit 0) (<= (+ i 2) end))
+               (loop for q from (1- i) downto (max start (- i 32768))
+                     while (< seen candidate-limit) do
+                 (when (and (= (aref data q) (aref data i))
+                            (= (aref data (1+ q)) (aref data (1+ i)))
+                            (< (+ q 2) end))
+                   (let ((n 2))
+                     (loop while (and (< n 258) (< (+ i n) end)
+                                      (= (aref data (+ q (mod n (- i q))))
+                                         (aref data (+ i n))))
+                           do (incf n))
+                     (when (> n best)
+                       (setf best n distance (- i q)))
+                     (incf seen)))))
+             (if (>= best 3)
+                 (progn (push (%token nil distance best) result)
+                        (incf i best))
+                 (progn (push (%token (aref data i) 0 0) result)
+                        (incf i))))
+        finally (return (nreverse result))))
+
+(defun %emit-symbol (w symbol lengths codes)
+  (%write-bits w (aref codes symbol) (aref lengths symbol)))
+
+(defun %emit-tokens (w tokens ll dl lc dc)
+  (dolist (token tokens)
+    (if (token-literal token)
+        (%emit-symbol w (token-literal token) ll lc)
+        (let* ((li (%symbol-for (token-length token) +length-bases+))
+               (di (%symbol-for (token-distance token) +distance-bases+)))
+          (%emit-symbol w (+ 257 li) ll lc)
+          (%write-bits w (- (token-length token) (aref +length-bases+ li)) (aref +length-extra+ li))
+          (%emit-symbol w di dl dc)
+          (%write-bits w (- (token-distance token) (aref +distance-bases+ di)) (aref +distance-extra+ di)))))
+  (%emit-symbol w 256 ll lc))
+
+(defun %emit-fixed (w tokens finalp)
+  (multiple-value-bind (ll dl) (%fixed-lengths)
+    (let ((lc (%canonical-codes ll)) (dc (%canonical-codes dl)))
+      (%write-bits w (if finalp 1 0) 1) (%write-bits w 1 2)
+      (%emit-tokens w tokens ll dl lc dc))))
+
+(defun %emit-stored (w data start end finalp)
+  (when (= start end)
+    (%write-bits w (if finalp 1 0) 1)
+    (%write-bits w 0 2)
+    (%align w)
+    (%write-bits w 0 16)
+    (%write-bits w #xffff 16))
+  (loop while (< start end) do
+    (let ((count (min #xffff (- end start)))
+          (last (= (+ start #xffff) end)))
+      (when (= count (- end start)) (setf last t))
+      (%write-bits w (if (and finalp last) 1 0) 1)
+      (%write-bits w 0 2)
+      (%align w)
+      (%write-bits w count 16)
+      (%write-bits w (logxor count #xffff) 16)
+      (loop for i from start below (+ start count)
+            do (%write-bits w (aref data i) 8))
+      (incf start count))))
+
+(defun %emit-dynamic (w tokens finalp)
+  (let ((lf (make-array 286 :initial-element 0)) (df (make-array 30 :initial-element 0)))
+    (dolist (tok tokens)
+      (if (token-literal tok)
+          (incf (aref lf (token-literal tok)))
+          (progn
+            (incf (aref lf (+ 257 (%symbol-for (token-length tok) +length-bases+))))
+            (incf (aref df (%symbol-for (token-distance tok) +distance-bases+))))))
+    (incf (aref lf 256))
+    ;; RFC 1951 requires at least one distance code, even when this block has
+    ;; no back-reference tokens.
+    (when (zerop (reduce #'+ df)) (setf (aref df 0) 1))
+    (let* ((ll (%huffman-lengths lf 15))
+           (dl (%huffman-lengths df 15))
+           (last-l (max 256 (loop for i downfrom 285 to 257
+                                  when (plusp (aref ll i)) do (return i))))
+           (last-d (max 0 (loop for i downfrom 29 to 0
+                                when (plusp (aref dl i)) do (return i))))
+           (all (concatenate 'vector (subseq ll 0 (1+ last-l))
+                             (subseq dl 0 (1+ last-d))))
+           (cl-freq (make-array 19 :initial-element 0)))
+      (loop for x across all do (incf (aref cl-freq x)))
+      (let* ((cl-lens (%huffman-lengths cl-freq 7))
+             (cl-order '(16 17 18 0 8 7 9 6 10 5 11 4 12 3 13 2 14 1 15))
+             (last-cl (max 3 (or (loop for p from 18 downto 4
+                                       when (plusp (aref cl-lens (nth p cl-order))) do (return p))
+                                   3)))
+             (cl-codes (%canonical-codes cl-lens)))
+        (%write-bits w (if finalp 1 0) 1) (%write-bits w 2 2)
+        (%write-bits w (- (1+ last-l) 257) 5)
+        (%write-bits w (- (1+ last-d) 1) 5)
+        (%write-bits w (- (1+ last-cl) 4) 4)
+        (loop for i from 0 to last-cl
+              do (%write-bits w (aref cl-lens (nth i cl-order)) 3))
+        (loop for x across all do (%emit-symbol w x cl-lens cl-codes))
+        (%emit-tokens w tokens ll dl (%canonical-codes ll) (%canonical-codes dl))))))
+
+(defstruct (deflater (:constructor %make-deflater))
+  (level 6) (history (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+  (writer (%make-bit-writer)) (finished-p nil) (last-output 0))
+
+(defun make-deflater (&key (level 6))
+  (unless (and (integerp level) (<= 0 level 9))
+    (error 'invalid-compression-level :level level))
+  (%make-deflater :level level))
+
+(defun %append-input (d data)
+  (let ((v (%coerce-octets data)))
+    (loop for x across v do (vector-push-extend x (deflater-history d)))))
+
+(defun deflater-write (d data)
+  (when (deflater-finished-p d) (error 'deflater-finished-error))
+  (let ((old (length (deflater-history d)))
+        (before (length (bit-writer-bytes (deflater-writer d)))))
+    (%append-input d data)
+    (if (= 0 (deflater-level d))
+        (%emit-stored (deflater-writer d) (deflater-history d) old
+                      (length (deflater-history d)) nil)
+        (let ((tokens (%tokens (deflater-history d) old (length (deflater-history d))
+                               (deflater-level d))))
+          (when tokens
+            (if (>= (deflater-level d) 4)
+                (%emit-dynamic (deflater-writer d) tokens nil)
+                (%emit-fixed (deflater-writer d) tokens nil)))))
+    ;; Do not align here: the next block header follows immediately after the
+    ;; end-of-block code.  Return only complete bytes and retain partial bits.
+    (let* ((bytes (bit-writer-bytes (deflater-writer d)))
+           (result (subseq bytes before)))
+      (setf (deflater-last-output d) (length result)) result)))
+
+(defun deflater-flush (d &key (sync t))
+  (declare (ignore sync))
+  (when (deflater-finished-p d) (error 'deflater-finished-error))
+  ;; An empty stored block is the RFC 1951 sync-flush marker.  It is byte
+  ;; aligned and leaves the dictionary untouched for the next write.
+  (%write-bits (deflater-writer d) 0 1) (%write-bits (deflater-writer d) 0 2)
+  (%align (deflater-writer d))
+  (%write-bits (deflater-writer d) 0 16) (%write-bits (deflater-writer d) #xffff 16)
+  (%finish-bits (deflater-writer d)))
+
+(defun deflater-finish (d)
+  (when (deflater-finished-p d) (error 'deflater-finished-error))
+  (let ((old (deflater-last-output d)))
+    (declare (ignore old))
+    (if (= 0 (deflater-level d))
+        (%emit-stored (deflater-writer d) (deflater-history d)
+                      (length (deflater-history d)) (length (deflater-history d)) t)
+        ;; A final empty fixed block is valid after any blocks emitted by writes.
+        (%emit-fixed (deflater-writer d) nil t))
+    (setf (deflater-finished-p d) t)
+    (%finish-bits (deflater-writer d))))
+
+(defun deflater-output (d)
+  (%finish-bits (deflater-writer d)))
+
+(defun deflate (data &key (level 6) (raw t) sync-flush)
+  (declare (ignore sync-flush))
+  (let ((d (make-deflater :level level)))
+    (%append-input d data)
+    (%emit-stored (deflater-writer d) (deflater-history d) 0
+                  (length (deflater-history d)) t)
+    (setf (deflater-finished-p d) t)
+    (%finish-bits (deflater-writer d))))
