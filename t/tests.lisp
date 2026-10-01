@@ -28,6 +28,29 @@
       (read-sequence output stream)
       output)))
 
+(defun %pattern-octets (length)
+  (let ((output (make-array length :element-type '(unsigned-byte 8))))
+    (loop for i below length
+          do (setf (aref output i) (char-code
+                                    (char "the quick brown fox jumps over the lazy dog "
+                                          (mod i 44)))))
+    output))
+
+(defun %random-octets (length)
+  (let ((output (make-array length :element-type '(unsigned-byte 8)))
+        (state 2463534242))
+    (loop for i below length
+          do (setf state (logand #xffffffff (+ (* state 1664525) 1013904223))
+                   (aref output i) (ldb (byte 8 24) state)))
+    output))
+
+(defun %assert-level-round-trips (input)
+  (loop for level from 0 to 9
+        for compressed = (deflate input :level level)
+        do (assert (equalp input (inflate compressed)))
+           (assert (equalp input (gzip-decompress (gzip-compress input :level level))))
+           (assert (equalp input (zlib-decompress (zlib-compress input :level level))))))
+
 (defun %gzip-executable ()
   "gzip")
 
@@ -89,6 +112,17 @@
                        (lambda () (gzip-decompress gzip :max-output 4)))
     (%assert-condition 'inflate-size-limit-exceeded
                        (lambda () (zlib-decompress zlib :max-output 4)))
+    (%assert-condition 'inflate-invalid-data
+                       (lambda () (inflate (make-array 1 :element-type '(unsigned-byte 8)
+                                                        :initial-contents '(7)))))
+    (%assert-condition 'inflate-invalid-data
+                       (lambda () (inflate (subseq raw 0 (1- (length raw))))))
     (%external-gzip-round-trip input)
+    (%assert-level-round-trips (make-array 0 :element-type '(unsigned-byte 8)))
+    (%assert-level-round-trips (%octets "x"))
+    (%assert-level-round-trips (%pattern-octets 32769))
+    (%assert-level-round-trips (%random-octets 65537))
+    (let ((compressed (deflate (%pattern-octets 65536) :level 6)))
+      (assert (< (length compressed) 65536)))
     (format t "checksum/container interoperability tests passed~%")
     t))
