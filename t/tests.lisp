@@ -1,0 +1,6 @@
+(in-package #:deflate-kit/test)
+(defun run-tests ()
+  (let* ((input (map '(vector (unsigned-byte 8)) #'char-code "hello hello hello hello"))
+         (raw (deflate input)) (round (inflate raw)) (gz (gzip-compress input)) (zr (zlib-compress input)))
+    (assert (equalp input round)) (assert (equalp input (gzip-decompress gz))) (assert (equalp input (zlib-decompress zr)))
+    (format t "3 tests passed~%") t))
