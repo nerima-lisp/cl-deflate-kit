@@ -163,6 +163,9 @@
           (when (zerop (aref literal-lengths 256))
             (%inflate-error "The literal/length table has no end-of-block symbol."
                             :missing-end-of-block))
+          (when (every #'zerop distance-lengths)
+            (%inflate-error "The distance table has no codes."
+                            :missing-distance-code))
           (multiple-value-bind (lt lm) (%inflate-huffman-table literal-lengths)
             (multiple-value-bind (dt dm) (%inflate-huffman-table distance-lengths)
               (values lt lm dt dm))))))))

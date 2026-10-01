@@ -18,7 +18,8 @@ The default decompression limit is 16 MiB. Exceeding it signals
 Malformed streams signal `inflate-invalid-data`; checksum failures signal
 `checksum-error`.
 
-Performance was measured on macOS arm64 with SBCL 2.6.0 using a 1 MiB
-deterministic pseudo-random octet vector and one-shot level 6 APIs. The
-The observed throughput was 0.44 MiB/s for deflate and 7.57 MiB/s for inflate;
-these are baseline measurements, not guarantees.
+Performance was measured on macOS arm64 with SBCL 2.6.0 using one-shot level 6
+APIs and deterministic 1 MiB inputs. A repeated-byte input compressed to 1,064
+bytes (0.1015%) at 23.60 MiB/s and inflated at 84.60 MiB/s. The deterministic
+pseudo-random input compressed to 1,049,370 bytes (100.0763%) at 2.79 MiB/s
+and inflated at 1.47 MiB/s. These are baseline measurements, not guarantees.
