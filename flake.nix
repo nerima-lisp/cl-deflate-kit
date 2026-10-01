@@ -19,6 +19,8 @@
           pname = "cl-deflate-kit-check"; version = "0.1.0"; src = self;
           nativeBuildInputs = [ pkgs.sbcl cl-weave.packages.${system}.default pkgs.gzip ];
           buildPhase = ''
+            export HOME="$TMPDIR/home"
+            mkdir -p "$HOME"
             export CL_SOURCE_REGISTRY="$PWD//:${cl-weave.packages.${system}.default}/share/common-lisp/source//"
             sbcl --noinform --non-interactive \
               --eval '(require :asdf)' \
