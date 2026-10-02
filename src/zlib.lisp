@@ -1,9 +1,5 @@
 (in-package #:deflate-kit)
 
-(defun %u16-be (octets index)
-  (logior (ash (aref octets index) 8)
-          (aref octets (1+ index))))
-
 (defun %u32-be (octets index)
   (logior (ash (aref octets index) 24)
           (ash (aref octets (+ index 1)) 16)
@@ -57,8 +53,11 @@
     (replace result compressed :start1 2)
     (%put-u32-be result (+ 2 (length compressed)) (adler32 input))))
 
-(defun zlib-decode (data &key max-output)
+(defun zlib-decode (data &key max-output max-output-bytes)
   "Decode and validate one RFC 1950 zlib stream."
+  (when (and max-output max-output-bytes)
+    (error 'deflate-error :message "specify only one output limit"))
+  (setf max-output (or max-output max-output-bytes))
   (%validate-max-output max-output)
   (let* ((input (%octets data))
          (length (length input)))

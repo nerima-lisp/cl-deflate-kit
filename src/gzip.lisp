@@ -113,8 +113,11 @@
               (%gzip-error "member input size mismatch")))
           (values output (+ trailer 8)))))))
 
-(defun gzip-decode (data &key max-output)
+(defun gzip-decode (data &key max-output max-output-bytes)
   "Decode all concatenated RFC 1952 members in DATA."
+  (when (and max-output max-output-bytes)
+    (error 'deflate-error :message "specify only one output limit"))
+  (setf max-output (or max-output max-output-bytes))
   (%validate-max-output max-output)
   (let* ((input (%octets data))
         (result (make-array 0 :element-type '(unsigned-byte 8)

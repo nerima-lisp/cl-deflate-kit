@@ -10,12 +10,6 @@
       (unless (typep condition type)
         (error "Expected ~S, got ~S" type (type-of condition))))))
 
-(defun %raw-deflate (data &key level)
-  (values (deflate data :level level) (length data)))
-
-(defun %raw-inflate-prefix (data &key (start 0) end max-output-bytes)
-  (inflate data :start start :end end :max-output-bytes max-output-bytes))
-
 (defun %write-octets (pathname octets)
   (with-open-file (stream pathname :direction :output :if-exists :supersede
                           :element-type '(unsigned-byte 8))
@@ -43,13 +37,6 @@
           do (setf state (logand #xffffffff (+ (* state 1664525) 1013904223))
                    (aref output i) (ldb (byte 8 24) state)))
     output))
-
-(defun %assert-level-round-trips (input)
-  (loop for level from 0 to 9
-        for compressed = (deflate input :level level)
-        do (assert (equalp input (inflate compressed)))
-           (assert (equalp input (gzip-decompress (gzip-compress input :level level))))
-           (assert (equalp input (zlib-decompress (zlib-compress input :level level))))))
 
 (defun %gzip-executable ()
   "gzip")
@@ -159,5 +146,5 @@
                        (lambda ()
                          (inflate (concatenate '(vector (unsigned-byte 8))
                                                raw #(0)))))
-    (format t "FR-002 focused test groups passed: 5~%")
+    (format t "FR-002 focused tests passed~%")
     t))

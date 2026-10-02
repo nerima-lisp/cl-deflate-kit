@@ -115,14 +115,6 @@
                 (incf at))))
         tree-lengths)))))
 
-(defun %fixed-tables ()
-  (values (%canonical-codes
-           (concatenate 'vector (make-array 144 :initial-element 8)
-                        (make-array 112 :initial-element 9)
-                        (make-array 24 :initial-element 7)
-                        (make-array 8 :initial-element 8)))
-          (make-array 288 :initial-element 0)))
-
 (defun %fixed-lengths ()
   (let ((a (make-array 288 :initial-element 0)) (b (make-array 32 :initial-element 5)))
     (loop for i below 144 do (setf (aref a i) 8))
@@ -319,15 +311,13 @@
 
 (defun deflater-finish (d)
   (when (deflater-finished-p d) (error 'deflater-finished-error))
-  (let ((old (deflater-last-output d)))
-    (declare (ignore old))
-    (if (= 0 (deflater-level d))
-        (%emit-stored (deflater-writer d) (deflater-history d)
-                      (length (deflater-history d)) (length (deflater-history d)) t)
-        ;; A final empty fixed block is valid after any blocks emitted by writes.
-        (%emit-fixed (deflater-writer d) nil t))
-    (setf (deflater-finished-p d) t)
-    (%finish-bits (deflater-writer d))))
+  (if (= 0 (deflater-level d))
+      (%emit-stored (deflater-writer d) (deflater-history d)
+                    (length (deflater-history d)) (length (deflater-history d)) t)
+      ;; A final empty fixed block is valid after any blocks emitted by writes.
+      (%emit-fixed (deflater-writer d) nil t))
+  (setf (deflater-finished-p d) t)
+  (%finish-bits (deflater-writer d)))
 
 (defun deflater-output (d)
   (%finish-bits (deflater-writer d)))
