@@ -302,22 +302,24 @@
 (defun deflater-flush (d &key (sync t))
   (declare (ignore sync))
   (when (deflater-finished-p d) (error 'deflater-finished-error))
-  ;; An empty stored block is the RFC 1951 sync-flush marker.  It is byte
-  ;; aligned and leaves the dictionary untouched for the next write.
-  (%write-bits (deflater-writer d) 0 1) (%write-bits (deflater-writer d) 0 2)
-  (%align (deflater-writer d))
-  (%write-bits (deflater-writer d) 0 16) (%write-bits (deflater-writer d) #xffff 16)
-  (%finish-bits (deflater-writer d)))
+  (let ((before (length (bit-writer-bytes (deflater-writer d)))))
+    ;; An empty stored block is the RFC 1951 sync-flush marker.  It is byte
+    ;; aligned and leaves the dictionary untouched for the next write.
+    (%write-bits (deflater-writer d) 0 1) (%write-bits (deflater-writer d) 0 2)
+    (%align (deflater-writer d))
+    (%write-bits (deflater-writer d) 0 16) (%write-bits (deflater-writer d) #xffff 16)
+    (subseq (%finish-bits (deflater-writer d)) before)))
 
 (defun deflater-finish (d)
   (when (deflater-finished-p d) (error 'deflater-finished-error))
-  (if (= 0 (deflater-level d))
-      (%emit-stored (deflater-writer d) (deflater-history d)
-                    (length (deflater-history d)) (length (deflater-history d)) t)
-      ;; A final empty fixed block is valid after any blocks emitted by writes.
-      (%emit-fixed (deflater-writer d) nil t))
-  (setf (deflater-finished-p d) t)
-  (%finish-bits (deflater-writer d)))
+  (let ((before (length (bit-writer-bytes (deflater-writer d)))))
+    (if (= 0 (deflater-level d))
+        (%emit-stored (deflater-writer d) (deflater-history d)
+                      (length (deflater-history d)) (length (deflater-history d)) t)
+        ;; A final empty fixed block is valid after any blocks emitted by writes.
+        (%emit-fixed (deflater-writer d) nil t))
+    (setf (deflater-finished-p d) t)
+    (subseq (%finish-bits (deflater-writer d)) before)))
 
 (defun deflater-output (d)
   (%finish-bits (deflater-writer d)))

@@ -107,6 +107,22 @@
     (deflater-finish deflater)
     (assert (equalp input (inflate (deflater-output deflater))))))
 
+(defun %stream-api-round-trip (input)
+  (let ((deflater (make-deflate-stream :level 6))
+        (chunks nil)
+        (inflater (make-inflate-stream)))
+    (push (deflate-stream-push deflater (subseq input 0 17)) chunks)
+    (push (deflate-stream-flush deflater) chunks)
+    (push (deflate-stream-push deflater (subseq input 17)) chunks)
+    (push (deflate-stream-finish deflater) chunks)
+    (let ((encoded (apply #'concatenate '(vector (unsigned-byte 8))
+                          (nreverse chunks))))
+      (loop for start from 0 below (length encoded) by 3
+            do (inflate-stream-push inflater
+                                    (subseq encoded start (min (+ start 3)
+                                                               (length encoded)))))
+      (assert (equalp input (inflate-stream-finish inflater))))))
+
 (defun %assert-output-limit (compressed)
   (let ((caught nil))
     (handler-case (inflate compressed :max-output-bytes 4)
@@ -124,6 +140,9 @@
          (member-2 (gzip-compress second))
          (zlib (zlib-compress input)))
     (assert (equalp input (inflate raw)))
+    ;; RFC 1951 fixed-Huffman vector for the ASCII string "hello".
+    (assert (equalp (%octets "hello")
+                    (inflate #(203 72 205 201 201 7 0))))
     (assert (= #xcbf43926 (crc32 (%octets "123456789"))))
     (assert (= #x11e60398 (adler32 (%octets "Wikipedia"))))
     (assert (equalp input (gzip-decompress gzip)))
@@ -143,6 +162,16 @@
     (assert (equalp (concatenate '(vector (unsigned-byte 8)) input second)
                     (gzip-decompress (concatenate '(vector (unsigned-byte 8))
                                                   gzip member-2))))
+    ;; The default limit applies to the complete concatenated gzip stream.
+    (%assert-condition 'inflate-size-limit-exceeded
+                       (lambda ()
+                         (let* ((large (make-array (* 16 1024 1024)
+                                                   :element-type '(unsigned-byte 8)
+                                                   :initial-element 65))
+                                (members (concatenate '(vector (unsigned-byte 8))
+                                                      (gzip-compress large)
+                                                      (gzip-compress #(66)))))
+                           (gzip-decompress members))))
     (assert (equalp input (zlib-decompress zlib)))
     (let ((bad (copy-seq gzip)))
       (setf (aref bad (- (length bad) 8))
@@ -186,6 +215,7 @@
       (assert (< (length (deflate repetitive :level 6)) (length repetitive)))
       (assert (equalp random (inflate (deflate random :level 6)))))
     (%streaming-one-byte-round-trip (%pattern-octets 257))
+    (%stream-api-round-trip (%pattern-octets 257))
     (%assert-output-limit (deflate (%pattern-octets 1024)))
     (%assert-condition 'inflate-size-limit-exceeded
                        (lambda ()

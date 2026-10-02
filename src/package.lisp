@@ -16,4 +16,5 @@
    #:make-deflater #:deflater-write #:deflater-flush #:deflater-finish
    #:deflater-output #:deflater-level
    #:make-inflate-stream #:inflate-stream-push #:inflate-stream-finish
-   #:make-deflate-stream #:deflate-stream-push #:deflate-stream-finish))
+   #:make-deflate-stream #:deflate-stream-push #:deflate-stream-flush
+   #:deflate-stream-finish))

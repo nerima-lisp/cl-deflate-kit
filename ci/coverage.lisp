@@ -1,0 +1,12 @@
+(require :asdf)
+(require :sb-cover)
+(declaim (optimize sb-c:store-coverage-data))
+(load "cl-deflate-kit.asd")
+(asdf:operate 'asdf:load-op "cl-deflate-kit" :force t)
+(sb-cover:reset-coverage)
+(asdf:test-system "cl-deflate-kit")
+(let ((coverage (sb-cover:save-coverage)))
+  (unless (and (listp coverage) (plusp (length coverage)))
+    (error "Coverage instrumentation produced no data."))
+  (format t "Coverage instrumentation produced ~D records.~%"
+          (length coverage)))
