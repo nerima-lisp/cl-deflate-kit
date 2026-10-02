@@ -1,0 +1,15 @@
+name: Quality
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - run: nix develop -c bash ci/lint.sh
+  coverage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - run: nix develop -c sbcl --script ci/coverage.lisp

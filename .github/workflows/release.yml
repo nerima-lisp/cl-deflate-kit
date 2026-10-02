@@ -1,0 +1,23 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - run: |
+          version=$(sed -n 's/.*:version "\([^"]*\)".*/\1/p' cl-deflate-kit.asd)
+          test -n "$version"
+          test "$GITHUB_REF_NAME" = "v$version"
+      - run: nix develop -c bash ci/lint.sh
+      - run: nix develop -c sbcl --script ci/coverage.lisp
+      - run: nix flake check --all-systems
+      - run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}
