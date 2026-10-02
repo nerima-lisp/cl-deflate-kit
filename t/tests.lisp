@@ -38,6 +38,25 @@
                    (aref output i) (ldb (byte 8 24) state)))
     output))
 
+(defun %gzip-with-extra (gzip)
+  (let ((header (copy-seq (subseq gzip 0 10))))
+    (setf (aref header 3) 4)
+    (concatenate '(vector (unsigned-byte 8))
+                 header #(3 0 1 2 3)
+                 (subseq gzip 10))))
+
+(defun %gzip-with-header-crc (gzip &key corrupt)
+  (let* ((header (copy-seq (subseq gzip 0 10)))
+         (body (subseq gzip 10))
+         (header-crc nil))
+    (setf (aref header 3) 2)
+    (setf header-crc (logand (crc32 header) #xffff))
+    (when corrupt (setf header-crc (logxor header-crc #xff)))
+    (concatenate '(vector (unsigned-byte 8)) header
+                 (vector (ldb (byte 8 0) header-crc)
+                         (ldb (byte 8 8) header-crc))
+                 body)))
+
 (defun %gzip-executable ()
   "gzip")
 
@@ -92,6 +111,14 @@
     (assert (= #xcbf43926 (crc32 (%octets "123456789"))))
     (assert (= #x11e60398 (adler32 (%octets "Wikipedia"))))
     (assert (equalp input (gzip-decompress gzip)))
+    (let ((extra (gzip-decompress (%gzip-with-extra gzip))))
+      (assert (equalp input extra)))
+    (assert (equalp input
+                    (gzip-decompress (%gzip-with-header-crc gzip))))
+    (%assert-condition 'checksum-error
+                       (lambda ()
+                         (gzip-decompress
+                          (%gzip-with-header-crc gzip :corrupt t))))
     (assert (equalp (concatenate '(vector (unsigned-byte 8)) input second)
                     (gzip-decompress (concatenate '(vector (unsigned-byte 8))
                                                   gzip member-2))))
