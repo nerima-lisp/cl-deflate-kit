@@ -170,19 +170,22 @@
             (multiple-value-bind (dt dm) (%inflate-huffman-table distance-lengths)
               (values lt lm dt dm))))))))
 
-(defun %inflate-push (output value max-output-bytes)
+(defun %inflate-push (output value max-output-bytes truncate-at)
   (when (>= (fill-pointer output) max-output-bytes)
     (error 'inflate-size-limit-exceeded
            :message "The DEFLATE output exceeded its size limit."
            :reason :output-limit :limit max-output-bytes
            :observed (1+ (fill-pointer output))))
-  (vector-push-extend value output))
+  (vector-push-extend value output)
+  (when (and truncate-at (>= (fill-pointer output) truncate-at))
+    (throw 'inflate-truncated (copy-seq output))))
 
 (defun %inflate-huffman-block
-    (reader output literal-table literal-max distance-table distance-max limit)
+    (reader output literal-table literal-max distance-table distance-max limit
+     truncate-at)
   (loop for symbol = (%inflate-decode-symbol reader literal-table literal-max)
         do (cond
-             ((< symbol 256) (%inflate-push output symbol limit))
+             ((< symbol 256) (%inflate-push output symbol limit truncate-at))
              ((= symbol 256) (return output))
              ((<= 257 symbol 285)
               (let* ((index (- symbol 257))
@@ -210,9 +213,9 @@
                   ;; Read from the current distance behind the write cursor so
                   ;; overlapping back-references repeat the copied pattern.
                   (loop repeat length
-                        do
-                    (vector-push-extend
-                     (aref output (- (fill-pointer output) distance)) output)))))
+                        do (%inflate-push output
+                                          (aref output (- (fill-pointer output) distance))
+                                          limit truncate-at)))))
              (t (%inflate-error "The DEFLATE literal/length symbol is invalid."
                                :invalid-literal-length-symbol symbol)))))
 
@@ -223,12 +226,15 @@
               value)))
 
 (defun inflate (octets &key (start 0) end max-output allow-trailing
-                        (max-output-bytes +deflate-default-max-output-bytes+))
+                        (max-output-bytes +deflate-default-max-output-bytes+)
+                        truncate-at size-hint)
   "Decode OCTETS as a raw RFC 1951 DEFLATE stream.
 
 Returns a fresh octet vector. MAX-OUTPUT-BYTES is enforced while output is
-produced, including bytes produced by overlapping back-references. The second
-return value is the number of input octets consumed from START."
+produced, including bytes produced by overlapping back-references. When
+TRUNCATE-AT is reached, decoding stops and the second return value is NIL.
+SIZE-HINT reserves output capacity up front. The second return value otherwise
+is the number of input octets consumed from START."
   (setf max-output-bytes (or max-output max-output-bytes
                               +deflate-default-max-output-bytes+))
   (unless (%inflate-octet-vector-p octets)
@@ -242,35 +248,52 @@ return value is the number of input octets consumed from START."
   (unless (and (integerp max-output-bytes) (>= max-output-bytes 0))
     (%inflate-error "MAX-OUTPUT-BYTES must be a non-negative integer."
                     :invalid-output-limit max-output-bytes))
+  (unless (or (null truncate-at)
+              (and (integerp truncate-at) (>= truncate-at 0)))
+    (%inflate-error "TRUNCATE-AT must be a non-negative integer."
+                    :invalid-truncate-at truncate-at))
+  (unless (or (null size-hint)
+              (and (integerp size-hint) (>= size-hint 0)))
+    (%inflate-error "SIZE-HINT must be a non-negative integer."
+                    :invalid-size-hint size-hint))
+  (when (zerop (or truncate-at 1))
+    (return-from inflate (values (make-array 0 :element-type '(unsigned-byte 8)) nil)))
   (when (= start end)
     (%inflate-error "The DEFLATE stream is empty." :truncated-input start))
   (let ((reader (%make-inflate-bit-reader octets start end))
-        (output (make-array 0 :element-type '(unsigned-byte 8)
+        (output (make-array (min (or size-hint 0) max-output-bytes)
+                            :element-type '(unsigned-byte 8)
                             :adjustable t :fill-pointer 0))
         (final-p nil))
-    (loop until final-p
-          do (setf final-p (= 1 (%inflate-read-bits reader 1)))
-             (case (%inflate-read-bits reader 2)
-               (0
-                (%inflate-align-byte reader)
-                (let ((length (%inflate-read-bits reader 16))
-                      (inverse (%inflate-read-bits reader 16)))
-                  (unless (= (logxor length inverse) #xffff)
-                    (%inflate-error "The stored block length check failed."
-                                    :stored-length-mismatch length))
-                  (dotimes (index length)
-                    (%inflate-push output (%inflate-read-bits reader 8)
-                                   max-output-bytes))))
-               (1
-                (multiple-value-bind (lt lm dt dm) (%inflate-fixed-tables)
-                  (%inflate-huffman-block reader output lt lm dt dm
-                                          max-output-bytes)))
-               (2
-                (multiple-value-bind (lt lm dt dm) (%inflate-dynamic-tables reader)
-                  (%inflate-huffman-block reader output lt lm dt dm
-                                          max-output-bytes)))
-               (t (%inflate-error "The DEFLATE block type is reserved."
-                                  :reserved-block-type))))
+    (let ((truncated-output
+            (catch 'inflate-truncated
+              (loop until final-p
+                    do (setf final-p (= 1 (%inflate-read-bits reader 1)))
+                       (case (%inflate-read-bits reader 2)
+                         (0
+                          (%inflate-align-byte reader)
+                          (let ((length (%inflate-read-bits reader 16))
+                                (inverse (%inflate-read-bits reader 16)))
+                            (unless (= (logxor length inverse) #xffff)
+                              (%inflate-error "The stored block length check failed."
+                                              :stored-length-mismatch length))
+                            (dotimes (index length)
+                              (%inflate-push output (%inflate-read-bits reader 8)
+                                             max-output-bytes truncate-at))))
+                         (1
+                          (multiple-value-bind (lt lm dt dm) (%inflate-fixed-tables)
+                            (%inflate-huffman-block reader output lt lm dt dm
+                                                    max-output-bytes truncate-at)))
+                         (2
+                          (multiple-value-bind (lt lm dt dm)
+                              (%inflate-dynamic-tables reader)
+                            (%inflate-huffman-block reader output lt lm dt dm
+                                                    max-output-bytes truncate-at)))
+                         (t (%inflate-error "The DEFLATE block type is reserved."
+                                            :reserved-block-type))))
+              nil)))
+      (when truncated-output
+        (return-from inflate (values truncated-output nil))))
     (when (plusp (inflate-bit-reader-bits reader))
       (unless (zerop (logand (inflate-bit-reader-buffer reader)
                              (1- (ash 1 (inflate-bit-reader-bits reader)))))

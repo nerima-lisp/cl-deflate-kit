@@ -143,6 +143,11 @@
     ;; RFC 1951 fixed-Huffman vector for the ASCII string "hello".
     (assert (equalp (%octets "hello")
                     (inflate #(203 72 205 201 201 7 0))))
+    (multiple-value-bind (prefix consumed)
+        (inflate #(203 72 205 201 201 7 0) :truncate-at 4)
+      (assert (equalp prefix (%octets "hell")))
+      (assert (null consumed)))
+    (assert (equalp input (inflate raw :size-hint 64)))
     (assert (= #xcbf43926 (crc32 (%octets "123456789"))))
     (assert (= #x11e60398 (adler32 (%octets "Wikipedia"))))
     (assert (equalp input (gzip-decompress gzip)))

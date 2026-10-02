@@ -22,6 +22,17 @@
 (export '(invalid-container-error checksum-error unsupported-container-error
           deflate-error-format deflate-error-reason register-raw-codecs))
 
+(defparameter +crc32-table+
+  (let ((table (make-array 256 :element-type '(unsigned-byte 32))))
+    (dotimes (index 256 table)
+      (let ((value index))
+        (loop repeat 8
+              do
+          (setf value (if (logbitp 0 value)
+                          (logxor #xedb88320 (ash value -1))
+                          (ash value -1))))
+        (setf (aref table index) value)))))
+
 (defun %octets (value)
   (typecase value
     ((vector (unsigned-byte 8)) value)
@@ -67,14 +78,13 @@
 
 (defun crc32 (data &key (initial #xffffffff) (start 0) end)
   "Return the IEEE CRC-32 of DATA as an unsigned 32-bit integer."
-  (let ((crc (%u32 initial)))
-    (loop for byte across (subseq (%octets data) start end)
-          do (setf crc (logxor crc byte))
-             (loop repeat 8
-                   do
-               (setf crc (if (logbitp 0 crc)
-                             (logxor (ash crc -1) #xedb88320)
-                             (ash crc -1)))))
+  (let ((octets (%octets data))
+        (crc (%u32 initial)))
+    (loop for index fixnum from start below (or end (length octets))
+          do (setf crc
+                   (logxor (aref +crc32-table+
+                                 (logand (logxor crc (aref octets index)) #xff))
+                           (ash crc -8))))
     (%u32 (logxor crc #xffffffff))))
 
 (defun adler32 (data &key (initial 1) (start 0) end)

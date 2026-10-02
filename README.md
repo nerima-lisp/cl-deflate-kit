@@ -11,7 +11,8 @@ DEFLATE octet vector. Compression levels 1-3 use fixed Huffman blocks; levels
 least 32 bytes. Level 0 uses stored blocks. `gzip-compress` and `zlib-compress`
 wrap the same raw codec.
 
-`inflate`, `gzip-decompress`, and `zlib-decompress` accept `:max-output-bytes`.
+`inflate` accepts `:max-output-bytes`, `:truncate-at`, and `:size-hint`.
+`gzip-decompress` and `zlib-decompress` accept `:max-output-bytes`.
 The container APIs also accept the compatibility spelling `:max-output`.
 The default decompression limit is 16 MiB. Exceeding it signals
 `inflate-size-limit-exceeded`, a subtype of `deflate-output-limit`.
