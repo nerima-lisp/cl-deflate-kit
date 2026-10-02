@@ -24,13 +24,13 @@
     (declare (ignore consumed))
     (%octets result)))
 
-(defun %inflate-raw (data &key (start 0) end max-output-bytes)
+(defun %inflate-raw (data &key (start 0) end max-output-bytes window-size)
   (or *raw-inflate-function*
       (%container-error :inflate "no raw inflate codec has been registered"))
   (let ((input (%octets data)))
     (multiple-value-bind (result consumed)
-        (funcall *raw-inflate-function* input :start start :end end
-                 :max-output-bytes max-output-bytes)
+      (funcall *raw-inflate-function* input :start start :end end
+                 :max-output-bytes max-output-bytes :window-size window-size)
       (values (%octets result) (or consumed (- (or end (length input)) start))))))
 
 (defun zlib-encode (data &key (level 6))
@@ -63,18 +63,19 @@
          (length (length input)))
     (when (< length 6)
       (%container-error :zlib "stream is shorter than its header and trailer"))
-    (let ((cmf (aref input 0))
-          (flg (aref input 1)))
+    (let* ((cmf (aref input 0))
+           (flg (aref input 1)))
       (unless (and (= (logand cmf #x0f) 8)
                    (<= (ash cmf -4) 7)
                    (zerop (mod (+ (ash cmf 8) flg) 31)))
-        (%container-error :zlib "invalid CMF/FLG header")))
+        (%container-error :zlib "invalid CMF/FLG header"))
     (when (logtest (aref input 1) #x20)
       (error 'unsupported-container-error :format :zlib
              :reason "preset dictionaries are not supported"))
-    (multiple-value-bind (output consumed)
+      (multiple-value-bind (output consumed)
         (%inflate-raw input :start 2 :end (- length 4)
-                      :max-output-bytes max-output)
+                      :max-output-bytes max-output
+                      :window-size (ash 256 (ash cmf -4)))
       (unless (= consumed (- length 6))
         (%container-error :zlib "raw stream does not end before the Adler-32 trailer"))
       (let ((expected (%u32-be input (- length 4)))
@@ -82,7 +83,7 @@
         (unless (= expected actual)
           (error 'checksum-error :format :zlib :reason "Adler-32 mismatch"
                  :expected expected :actual actual)))
-      output)))
+      output))))
 
 (setf (fdefinition 'encode-zlib) #'zlib-encode
       (fdefinition 'decode-zlib) #'zlib-decode

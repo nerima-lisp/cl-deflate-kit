@@ -182,7 +182,7 @@
 
 (defun %inflate-huffman-block
     (reader output literal-table literal-max distance-table distance-max limit
-     truncate-at)
+     truncate-at window-size)
   (loop for symbol = (%inflate-decode-symbol reader literal-table literal-max)
         do (cond
              ((< symbol 256) (%inflate-push output symbol limit truncate-at))
@@ -202,7 +202,7 @@
                                      reader (aref +inflate-distance-extra+
                                                   distance-symbol))))
                        (start (- (fill-pointer output) distance)))
-                  (when (or (zerop distance) (minusp start))
+                  (when (or (zerop distance) (> distance window-size) (minusp start))
                     (%inflate-error "The DEFLATE distance points before output."
                                     :distance-before-output distance))
                   (when (> (+ (fill-pointer output) length) limit)
@@ -227,7 +227,7 @@
 
 (defun inflate (octets &key (start 0) end max-output allow-trailing
                         (max-output-bytes +deflate-default-max-output-bytes+)
-                        truncate-at size-hint)
+                        truncate-at size-hint (window-size 32768))
   "Decode OCTETS as a raw RFC 1951 DEFLATE stream.
 
 Returns a fresh octet vector. MAX-OUTPUT-BYTES is enforced while output is
@@ -256,6 +256,9 @@ is the number of input octets consumed from START."
               (and (integerp size-hint) (>= size-hint 0)))
     (%inflate-error "SIZE-HINT must be a non-negative integer."
                     :invalid-size-hint size-hint))
+  (unless (and (integerp window-size) (<= 256 window-size 32768))
+    (%inflate-error "WINDOW-SIZE must be between 256 and 32768."
+                    :invalid-window-size window-size))
   (when (zerop (or truncate-at 1))
     (return-from inflate (values (make-array 0 :element-type '(unsigned-byte 8)) nil)))
   (when (= start end)
@@ -283,12 +286,14 @@ is the number of input octets consumed from START."
                          (1
                           (multiple-value-bind (lt lm dt dm) (%inflate-fixed-tables)
                             (%inflate-huffman-block reader output lt lm dt dm
-                                                    max-output-bytes truncate-at)))
+                                                    max-output-bytes truncate-at
+                                                    window-size)))
                          (2
                           (multiple-value-bind (lt lm dt dm)
                               (%inflate-dynamic-tables reader)
                             (%inflate-huffman-block reader output lt lm dt dm
-                                                    max-output-bytes truncate-at)))
+                                                    max-output-bytes truncate-at
+                                                    window-size)))
                          (t (%inflate-error "The DEFLATE block type is reserved."
                                             :reserved-block-type))))
               nil)))

@@ -3,9 +3,11 @@
 (register-raw-codecs
  (lambda (data &key level)
    (deflate data :level (or level 6)))
- (lambda (data &key (start 0) end max-output-bytes truncate-at size-hint)
+ (lambda (data &key (start 0) end max-output-bytes truncate-at size-hint
+                   window-size)
    (inflate data :start start :end end :allow-trailing t
             :truncate-at truncate-at :size-hint size-hint
+            :window-size (or window-size 32768)
             :max-output-bytes (or max-output-bytes
                                   +deflate-default-max-output-bytes+))))
 

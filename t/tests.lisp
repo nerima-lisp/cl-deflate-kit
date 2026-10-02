@@ -178,6 +178,24 @@
                                                       (gzip-compress #(66)))))
                            (gzip-decompress members))))
     (assert (equalp input (zlib-decompress zlib)))
+    (%assert-condition 'inflate-invalid-data
+                       (lambda ()
+                         (let ((large (make-array 514
+                                                  :element-type '(unsigned-byte 8))))
+                           (loop for index below (length large)
+                                 do (setf (aref large index)
+                                          (if (= (mod index 257) 256)
+                                              99
+                                              (mod index 257))))
+                           (let* ((small-window (zlib-compress large))
+                                  (cmf #x08)
+                                  (flg (logand (aref small-window 1) #xe0))
+                                  (fcheck (mod (- 31 (mod (+ (ash cmf 8) flg)
+                                                             31))
+                                                  31)))
+                             (setf (aref small-window 0) cmf
+                                   (aref small-window 1) (logior flg fcheck))
+                             (zlib-decompress small-window)))))
     (let ((bad (copy-seq gzip)))
       (setf (aref bad (- (length bad) 8))
             (logxor (aref bad (- (length bad) 8)) #xff))
@@ -206,6 +224,8 @@
                                                         :initial-contents '(7)))))
     (%assert-condition 'inflate-invalid-data
                        (lambda () (inflate (subseq raw 0 (1- (length raw))))))
+    (let ((random (%random-octets 32)))
+      (assert (equalp random (inflate (deflate random :level 6)))))
     (dolist (level '(0 1 3 6 9))
       (%external-gzip-round-trip (%pattern-octets 4097) :level level))
     (%external-gzip-round-trip (%pattern-octets 4097) :level 9 :no-name t)

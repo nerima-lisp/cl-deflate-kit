@@ -243,8 +243,9 @@
     (when (zerop (reduce #'+ df)) (setf (aref df 0) 1))
     (let* ((ll (%huffman-lengths lf 15))
            (dl (%huffman-lengths df 15))
-           (last-l (max 256 (loop for i downfrom 285 to 257
-                                  when (plusp (aref ll i)) do (return i))))
+           (last-l (max 256 (or (loop for i downfrom 285 to 257
+                                      when (plusp (aref ll i)) do (return i))
+                                256)))
            (last-d (max 0 (loop for i downfrom 29 to 0
                                 when (plusp (aref dl i)) do (return i))))
            (all (concatenate 'vector (subseq ll 0 (1+ last-l))
@@ -322,7 +323,12 @@
     (subseq (%finish-bits (deflater-writer d)) before)))
 
 (defun deflater-output (d)
-  (%finish-bits (deflater-writer d)))
+  (let ((writer (deflater-writer d)))
+    (%finish-bits
+     (%make-bit-writer
+      :bytes (copy-seq (bit-writer-bytes writer))
+      :bit-buffer (bit-writer-bit-buffer writer)
+      :bit-count (bit-writer-bit-count writer)))))
 
 (defun deflate (data &key (level 6) (raw t) sync-flush)
   (declare (ignore raw sync-flush))
