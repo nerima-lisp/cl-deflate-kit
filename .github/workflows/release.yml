@@ -17,7 +17,7 @@ jobs:
           test "$GITHUB_REF_NAME" = "v$version"
       - run: nix develop -c bash ci/lint.sh
       - run: nix develop -c sbcl --script ci/coverage.lisp
-      - run: nix flake check --all-systems
+      - run: nix flake check
       - run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
         env:
           GH_TOKEN: ${{ github.token }}

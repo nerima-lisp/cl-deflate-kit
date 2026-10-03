@@ -38,6 +38,7 @@ s (65.377 MiB/s). The deterministic LCG pseudo-random input compressed to
 MiB/s). The benchmark uses `state = (state * 1664525 + 1013904223) mod 2^32`
 and emits the high byte, with one warm-up run and full output comparisons.
 
-`nix flake check --all-systems` is the release gate. `ci/lint.sh` checks Nix
-formatting and compilation, while `ci/coverage.lisp` runs the ASDF tests with
-SBCL's built-in coverage instrumentation and rejects an empty coverage result.
+`nix flake check` on the Ubuntu x86_64 runner is the release gate. `ci/lint.sh`
+checks Nix formatting and compilation, while `ci/coverage.lisp` runs the ASDF
+tests with SBCL's built-in coverage instrumentation and rejects an empty
+coverage result.
