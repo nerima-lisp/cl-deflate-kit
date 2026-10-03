@@ -269,7 +269,7 @@
 
 (defstruct (deflater (:constructor %make-deflater))
   (level 6) (history (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
-  (writer (%make-bit-writer)) (finished-p nil) (last-output 0))
+  (writer (%make-bit-writer)) (finished-p nil))
 
 (defun make-deflater (&key (level 6))
   (unless (and (integerp level) (<= 0 level 9))
@@ -296,12 +296,12 @@
                 (%emit-fixed (deflater-writer d) tokens nil)))))
     ;; Do not align here: the next block header follows immediately after the
     ;; end-of-block code.  Return only complete bytes and retain partial bits.
-    (let* ((bytes (bit-writer-bytes (deflater-writer d)))
-           (result (subseq bytes before)))
-      (setf (deflater-last-output d) (length result)) result)))
+    (let ((bytes (bit-writer-bytes (deflater-writer d))))
+      (subseq bytes before))))
 
 (defun deflater-flush (d &key (sync t))
-  (declare (ignore sync))
+  (unless sync
+    (error 'deflate-error :message "Only synchronous DEFLATE flushing is supported."))
   (when (deflater-finished-p d) (error 'deflater-finished-error))
   (let ((before (length (bit-writer-bytes (deflater-writer d)))))
     ;; An empty stored block is the RFC 1951 sync-flush marker.  It is byte
@@ -331,7 +331,10 @@
       :bit-count (bit-writer-bit-count writer)))))
 
 (defun deflate (data &key (level 6) (raw t) sync-flush)
-  (declare (ignore raw sync-flush))
+  (unless raw
+    (error 'deflate-error :message "Only raw DEFLATE output is supported."))
+  (when sync-flush
+    (error 'deflate-error :message "SYNC-FLUSH requires the deflater stream API."))
   (unless (and (integerp level) (<= 0 level 9))
     (error 'invalid-compression-level :level level))
   (let* ((input (%coerce-octets data))

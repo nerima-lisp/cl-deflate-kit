@@ -27,7 +27,7 @@
         system: pkgs: {
           default = pkgs.stdenvNoCC.mkDerivation {
             pname = "cl-deflate-kit";
-            version = "0.1.0";
+            version = "0.1.1";
             src = self;
             dontBuild = true;
             installPhase = "mkdir -p $out/share/common-lisp/source/cl-deflate-kit; cp -r *.asd src t README.md CHANGELOG.md LICENSE $out/share/common-lisp/source/cl-deflate-kit/";
@@ -39,7 +39,7 @@
         system: pkgs: {
           default = pkgs.stdenvNoCC.mkDerivation {
             pname = "cl-deflate-kit-check";
-            version = "0.1.0";
+            version = "0.1.1";
             src = self;
             nativeBuildInputs = [
               pkgs.sbcl
