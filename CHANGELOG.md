@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Standardized CI and release verification on Ubuntu x86_64 runners.
+
 ## 0.1.1
 
 - Reject reserved RFC 1951 dynamic Huffman counts.
