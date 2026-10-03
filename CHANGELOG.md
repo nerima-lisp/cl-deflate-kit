@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1
+
+- Reject reserved RFC 1951 dynamic Huffman counts.
+- Reject unsupported one-shot and asynchronous flush options instead of ignoring them.
+
 ## 0.1.0
 
 - Added pure Common Lisp RFC 1951 DEFLATE, RFC 1950 zlib, and RFC 1952 gzip codecs.

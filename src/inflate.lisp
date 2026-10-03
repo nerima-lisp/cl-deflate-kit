@@ -29,10 +29,8 @@
                    (inflate-bit-reader-position reader) (1+ position)
                    (inflate-bit-reader-bits reader)
                    (+ (inflate-bit-reader-bits reader) 8))))
-  (let ((mask (if (zerop count) 0 (1- (ash 1 count))))
-        (value (logand (inflate-bit-reader-buffer reader)
+  (let ((value (logand (inflate-bit-reader-buffer reader)
                        (if (zerop count) 0 (1- (ash 1 count))))))
-    (declare (ignore mask))
     (setf (inflate-bit-reader-buffer reader)
           (ash (inflate-bit-reader-buffer reader) (- count))
           (inflate-bit-reader-bits reader)
@@ -120,6 +118,12 @@
          (distance-count (+ 1 (%inflate-read-bits reader 5)))
          (code-count (+ 4 (%inflate-read-bits reader 4)))
          (code-lengths (make-array 19 :initial-element 0)))
+    (when (> literal-count 286)
+      (%inflate-error "The DEFLATE literal/length count is reserved."
+                      :reserved-literal-length-count literal-count))
+    (when (> distance-count 30)
+      (%inflate-error "The DEFLATE distance count is reserved."
+                      :reserved-distance-count distance-count))
     (loop for index below code-count
           do (setf (aref code-lengths (aref +inflate-code-length-order+ index))
                    (%inflate-read-bits reader 3)))

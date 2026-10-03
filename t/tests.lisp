@@ -250,5 +250,11 @@
                        (lambda ()
                          (inflate (concatenate '(vector (unsigned-byte 8))
                                                raw #(0)))))
+    (%assert-condition 'deflate-error
+                       (lambda () (deflate input :raw nil)))
+    (%assert-condition 'deflate-error
+                       (lambda () (deflate input :sync-flush t)))
+    (%assert-condition 'deflate-error
+                       (lambda () (deflater-flush (make-deflater) :sync nil)))
     (format t "FR-002 focused tests passed~%")
     t))
