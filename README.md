@@ -12,11 +12,45 @@ least 32 bytes. Level 0 uses stored blocks. `gzip-compress` and `zlib-compress`
 wrap the same raw codec.
 
 `inflate` accepts `:max-output-bytes`, `:truncate-at`, and `:size-hint`.
-`gzip-decompress` and `zlib-decompress` accept `:max-output-bytes`.
-The container APIs also accept the compatibility spelling `:max-output`.
+`gzip-decode` and `zlib-decode` accept `:max-output-bytes` and the compatibility
+spelling `:max-output`. The gzip decoder also accepts `:allow-trailing-padding`,
+which defaults to `NIL`.
+
+`gzip-decode` returns the concatenated decoded octets from all members as its
+primary value and a list of `gzip-member-header` structures as its second
+value. The list contains one header per member, in input order.
+Existing callers that use only the primary value continue to receive the
+decoded octets. The structure exposes these accessors:
+
+| Accessor | Value |
+| --- | --- |
+| `gzip-member-header-flags` | Header flags byte. |
+| `gzip-member-header-mtime` | Modification time as an unsigned 32-bit value. |
+| `gzip-member-header-xfl` | XFL byte. |
+| `gzip-member-header-extra-flags` | Alias for `gzip-member-header-xfl`. |
+| `gzip-member-header-os` | Operating system byte. |
+| `gzip-member-header-operating-system` | Alias for `gzip-member-header-os`. |
+| `gzip-member-header-fextra` | Raw FEXTRA octets. |
+| `gzip-member-header-extra` | Alias for `gzip-member-header-fextra`. |
+| `gzip-member-header-fname` | Raw FNAME octets. |
+| `gzip-member-header-fcomment` | Raw FCOMMENT octets. |
+| `gzip-member-header-fhcrc` | Validated 16-bit FHCRC value. |
+
+FEXTRA, FNAME, and FCOMMENT accessors return `NIL` when their field is absent.
+They return an empty octet vector when the field is present but empty. Header
+FEXTRA contains only the field payload, without its two-byte length. FNAME and
+FCOMMENT omit their terminating NUL. Header text fields remain raw bytes and
+are not decoded as strings. FHCRC returns `NIL` when the header has no FHCRC.
+
+With `:allow-trailing-padding t`, `gzip-decode` accepts a suffix only when at
+least one member has decoded and every remaining byte is zero. Padding adds no
+member or header. Empty or all-zero input, zero-valued bytes between members,
+and nonzero or mixed trailing data still signal `invalid-container-error`.
+
 The default decompression limit is 16 MiB. Exceeding it signals
 `inflate-size-limit-exceeded`, a subtype of `deflate-output-limit`.
-Malformed streams signal `inflate-invalid-data`; checksum failures signal
+Malformed raw DEFLATE payloads signal `inflate-invalid-data`; malformed gzip or
+zlib framing signals `invalid-container-error`. Checksum failures signal
 `checksum-error`.
 
 The public API covers raw DEFLATE, zlib, gzip, CRC-32, Adler-32, and chunk-

@@ -38,6 +38,122 @@
                    (aref output i) (ldb (byte 8 24) state)))
     output))
 
+(defun %test-gzip-header-padding (input second)
+  (let ((checks 0))
+    (flet ((check (passed)
+             (incf checks)
+             (assert passed)))
+      (let* ((member (gzip-compress input :mtime #x89abcdef
+                                    :filename "hello.txt" :comment "kit test"))
+             (plain-member (gzip-compress second))
+             (empty-name-member
+               (gzip-compress input :filename "" :comment ""))
+             (empty-extra-member (%gzip-with-extra plain-member #()))
+             (joined nil)
+             (padding nil)
+             (garbage nil)
+             (mixed nil)
+             (inter-member-padding nil))
+        (setf (aref member 3) (logior (aref member 3) 1)
+              (aref member 8) 2
+              (aref member 9) 3
+              member (%gzip-with-extra member)
+              member (%gzip-with-header-crc member)
+              joined (concatenate '(vector (unsigned-byte 8))
+                                  member plain-member)
+              padding (concatenate '(vector (unsigned-byte 8)) joined #(0 0))
+              garbage (concatenate '(vector (unsigned-byte 8)) joined #(1))
+              mixed (concatenate '(vector (unsigned-byte 8)) joined #(0 1))
+              inter-member-padding
+                (concatenate '(vector (unsigned-byte 8)) member #(0) plain-member))
+        (multiple-value-bind (decoded headers) (gzip-decode member)
+          (check (equalp decoded input))
+          (check (= (length headers) 1))
+          (let ((header (first headers)))
+            (check (gzip-member-header-p header))
+            (check (= (gzip-member-header-flags header) #x1f))
+            (check (= (gzip-member-header-mtime header) #x89abcdef))
+            (check (= (gzip-member-header-xfl header) 2))
+            (check (= (gzip-member-header-os header) 3))
+            (check (equalp (gzip-member-header-fextra header) #(1 2 3)))
+            (check (equalp (gzip-member-header-fname header)
+                           (%octets "hello.txt")))
+            (check (equalp (gzip-member-header-fcomment header)
+                           (%octets "kit test")))
+            (check (= (gzip-member-header-fhcrc header)
+                      (logand (crc32 (subseq member 0 (%gzip-header-end member)))
+                              #xffff)))))
+        (multiple-value-bind (decoded headers) (gzip-decode plain-member)
+          (check (equalp decoded second))
+          (check (= (length headers) 1))
+          (let ((header (first headers)))
+            (check (zerop (gzip-member-header-flags header)))
+            (check (zerop (gzip-member-header-mtime header)))
+            (check (zerop (gzip-member-header-xfl header)))
+            (check (= (gzip-member-header-os header) 255))
+            (check (null (gzip-member-header-fextra header)))
+            (check (null (gzip-member-header-fname header)))
+            (check (null (gzip-member-header-fcomment header)))
+            (check (null (gzip-member-header-fhcrc header)))))
+        (multiple-value-bind (decoded headers)
+            (gzip-decode empty-name-member)
+          (declare (ignore decoded))
+          (let ((header (first headers)))
+            (check (equalp (gzip-member-header-fname header) #()))
+            (check (equalp (gzip-member-header-fcomment header) #()))
+            (check (= (gzip-member-header-flags header) 24))))
+        (multiple-value-bind (decoded headers)
+            (gzip-decode empty-extra-member)
+          (declare (ignore decoded))
+          (check (= (length headers) 1))
+          (check (equalp (gzip-member-header-fextra (first headers)) #()))
+          (check (= (gzip-member-header-flags (first headers)) 4)))
+        (multiple-value-bind (decoded headers) (gzip-decode joined)
+          (check (equalp decoded
+                         (concatenate '(vector (unsigned-byte 8)) input second)))
+          (check (= (length headers) 2))
+          (check (= (gzip-member-header-mtime (first headers)) #x89abcdef))
+          (check (equalp (gzip-member-header-fname (first headers))
+                         (%octets "hello.txt")))
+          (check (zerop (gzip-member-header-mtime (second headers))))
+          (check (null (gzip-member-header-fname (second headers))))
+          (check (zerop (gzip-member-header-flags (second headers)))))
+        (check (progn
+                 (%assert-condition 'invalid-container-error
+                                    (lambda () (gzip-decode padding)))
+                 t))
+        (multiple-value-bind (decoded headers)
+            (gzip-decode padding :allow-trailing-padding t)
+          (check (equalp decoded
+                         (concatenate '(vector (unsigned-byte 8)) input second)))
+          (check (= (length headers) 2)))
+        (check (equalp input
+                       (gzip-decode member :allow-trailing-padding t)))
+        (check (progn
+                 (%assert-condition
+                  'invalid-container-error
+                  (lambda () (gzip-decode garbage :allow-trailing-padding t)))
+                 t))
+        (check (progn
+                 (%assert-condition
+                  'invalid-container-error
+                  (lambda () (gzip-decode mixed :allow-trailing-padding t)))
+                 t))
+        (check (progn
+                 (%assert-condition
+                  'invalid-container-error
+                  (lambda ()
+                    (gzip-decode inter-member-padding
+                                 :allow-trailing-padding t)))
+                 t))
+        (check (progn
+                 (%assert-condition
+                  'invalid-container-error
+                  (lambda () (gzip-decode #(0 0) :allow-trailing-padding t)))
+                 t))))
+    (format t "Gzip header and padding checks passed: ~D~%" checks)
+    checks))
+
 (defun %gzip-header-end (gzip)
   (let ((flags (aref gzip 3))
         (index 10))
@@ -51,11 +167,14 @@
         (incf index)))
     index))
 
-(defun %gzip-with-extra (gzip)
+(defun %gzip-with-extra (gzip &optional (extra #(1 2 3)))
   (let ((header (copy-seq (subseq gzip 0 10))))
     (setf (aref header 3) (logior (aref header 3) 4))
     (concatenate '(vector (unsigned-byte 8))
-                 header #(3 0 1 2 3)
+                 header
+                 (vector (ldb (byte 8 0) (length extra))
+                         (ldb (byte 8 8) (length extra)))
+                 extra
                  (subseq gzip 10))))
 
 (defun %gzip-with-header-crc (gzip &key corrupt)
@@ -256,5 +375,6 @@
                        (lambda () (deflate input :sync-flush t)))
     (%assert-condition 'deflate-error
                        (lambda () (deflater-flush (make-deflater) :sync nil)))
+    (%test-gzip-header-padding input second)
     (format t "FR-002 focused tests passed~%")
     t))

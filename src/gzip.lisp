@@ -1,5 +1,11 @@
 (in-package #:deflate-kit)
 
+(defstruct (gzip-member-header
+            (:constructor %make-gzip-member-header))
+  flags mtime xfl os fextra fname fcomment fhcrc)
+(defun gzip-member-header-extra-flags (header) (gzip-member-header-xfl header))
+(defun gzip-member-header-operating-system (header) (gzip-member-header-os header))
+
 (defun %put-u16-le (octets index value)
   (setf (aref octets index) (ldb (byte 8 0) value)
         (aref octets (1+ index)) (ldb (byte 8 8) value))
@@ -77,25 +83,37 @@
                  (= (aref input (+ start 2)) 8))
       (%gzip-error "invalid member signature or compression method"))
     (let* ((flags (aref input (+ start 3)))
-           (index (+ start 10)))
+           (index (+ start 10))
+           (fextra nil)
+           (fname nil)
+           (fcomment nil)
+           (fhcrc nil))
       (when (logtest flags #xe0)
         (%gzip-error "reserved header flags are set"))
       (when (logtest flags 4)
         (when (> (+ index 2) length) (%gzip-error "truncated extra field length"))
-        (let ((extra-length (%u16-le input index)))
-          (incf index 2)
-          (when (> (+ index extra-length) length) (%gzip-error "truncated extra field"))
-          (incf index extra-length)))
-      (when (logtest flags 8) (setf index (%skip-zero-terminated input index length)))
-      (when (logtest flags 16) (setf index (%skip-zero-terminated input index length)))
+        (let* ((extra-length (%u16-le input index))
+               (extra-start (+ index 2))
+               (extra-end (+ extra-start extra-length)))
+          (when (> extra-end length) (%gzip-error "truncated extra field"))
+          (setf fextra (subseq input extra-start extra-end)
+                index extra-end)))
+      (when (logtest flags 8)
+        (let ((field-end (%skip-zero-terminated input index length)))
+          (setf fname (subseq input index (1- field-end))
+                index field-end)))
+      (when (logtest flags 16)
+        (let ((field-end (%skip-zero-terminated input index length)))
+          (setf fcomment (subseq input index (1- field-end))
+                index field-end)))
       (when (logtest flags 2)
         (when (> (+ index 2) length) (%gzip-error "truncated header CRC"))
-        ;; FHCRC is the low 16 bits of the header CRC32.
         (let ((expected (%u16-le input index))
               (actual (logand (crc32 (subseq input start index)) #xffff)))
           (unless (= expected actual)
             (error 'checksum-error :format :gzip :reason "header CRC mismatch"
-                   :expected expected :actual actual)))
+                   :expected expected :actual actual))
+          (setf fhcrc expected))
         (incf index 2))
       (when (> (+ index 8) length) (%gzip-error "truncated member trailer"))
       (multiple-value-bind (output consumed)
@@ -111,10 +129,23 @@
                      :expected expected-crc :actual actual-crc))
             (unless (= expected-size (logand (length output) #xffffffff))
               (%gzip-error "member input size mismatch")))
-          (values output (+ trailer 8)))))))
+          (values output
+                  (+ trailer 8)
+                  (%make-gzip-member-header
+                   :flags flags
+                   :mtime (%u32-le input (+ start 4))
+                   :xfl (aref input (+ start 8))
+                   :os (aref input (+ start 9))
+                   :fextra fextra
+                   :fname fname
+                   :fcomment fcomment
+                   :fhcrc fhcrc)))))))
 
-(defun gzip-decode (data &key max-output max-output-bytes)
-  "Decode all concatenated RFC 1952 members in DATA."
+(defun gzip-decode (data &key max-output max-output-bytes
+                              (allow-trailing-padding nil))
+  "Decode all concatenated RFC 1952 members in DATA.
+Return the decoded octets and a list of their headers in input order.
+When ALLOW-TRAILING-PADDING is true, accept an all-zero suffix only after at least one member."
   (when (and max-output max-output-bytes)
     (error 'deflate-error :message "specify only one output limit"))
   (setf max-output (or max-output max-output-bytes))
@@ -123,17 +154,25 @@
          (output-limit (or max-output +deflate-default-max-output-bytes+))
          (result (make-array 0 :element-type '(unsigned-byte 8)
                             :adjustable t))
+         (headers nil)
          (index 0))
     (when (zerop (length input)) (%gzip-error "empty stream"))
     (loop while (< index (length input))
-          do (multiple-value-bind (member next)
+          do (when (and headers
+                        allow-trailing-padding
+                        (loop for padding-index from index below (length input)
+                              always (zerop (aref input padding-index))))
+               (setf index (length input))
+               (return))
+             (multiple-value-bind (member next header)
                  (%gzip-member input index
                                (- output-limit (length result)))
                (let ((old-length (length result)))
                  (setf result (adjust-array result (+ old-length (length member))))
                  (replace result member :start1 old-length))
+               (push header headers)
                (setf index next)))
-    result))
+    (values result (nreverse headers))))
 
 (setf (fdefinition 'encode-gzip) #'gzip-encode
       (fdefinition 'decode-gzip) #'gzip-decode

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- Expose parsed gzip member headers as the second value from `gzip-decode`.
+- Add opt-in support for trailing padding made only of zero-valued bytes after
+  one or more gzip members.
+
 ## 0.1.2
 
 - Standardized CI and release verification on Ubuntu x86_64 runners.
