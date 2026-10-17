@@ -11,6 +11,13 @@
    #:deflater-finished-error
    #:inflate #:deflate
    #:gzip-encode #:gzip-decode #:gzip-compress #:gzip-decompress
+   #:gzip-member-header #:gzip-member-header-p
+   #:gzip-member-header-flags #:gzip-member-header-mtime
+   #:gzip-member-header-xfl #:gzip-member-header-extra-flags
+   #:gzip-member-header-os #:gzip-member-header-operating-system
+   #:gzip-member-header-fextra #:gzip-member-header-extra
+   #:gzip-member-header-fname #:gzip-member-header-fcomment
+   #:gzip-member-header-fhcrc
    #:zlib-encode #:zlib-decode #:zlib-compress #:zlib-decompress
    #:crc32 #:adler32 #:register-raw-codecs
    #:make-deflater #:deflater-write #:deflater-flush #:deflater-finish
