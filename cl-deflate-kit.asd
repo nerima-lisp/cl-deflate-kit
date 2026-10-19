@@ -1,15 +1,19 @@
 (in-package #:asdf-user)
 (asdf:defsystem "cl-deflate-kit"
-  :description "Pure Common Lisp DEFLATE, zlib and gzip codecs."
+  :description "Pure Common Lisp DEFLATE, zlib, gzip, and Brotli codecs."
   :version "0.3.0" :license "MIT" :author "nerima-lisp"
   :pathname "src" :serial t
   :components ((:file "package") (:file "conditions")
                (:file "checksums") (:file "inflate") (:file "deflate")
-               (:file "zlib") (:file "gzip") (:file "compat"))
+               (:file "zlib") (:file "gzip") (:file "compat")
+               (:file "brotli-dictionary") (:file "brotli"))
   :in-order-to ((test-op (test-op "cl-deflate-kit/test"))))
 (asdf:defsystem "cl-deflate-kit/test"
   :depends-on ("cl-deflate-kit" "cl-weave") :pathname "t" :serial t
   :components ((:file "package") (:file "corrupt-fixtures")
-               (:file "codec-property-tests") (:file "tests"))
+               (:file "codec-property-tests") (:file "tests")
+               (:file "brotli-tests"))
   :perform (asdf:test-op (op c) (declare (ignore op c))
-             (uiop:symbol-call "DEFLATE-KIT/TEST" "RUN-TESTS")))
+             (progn
+               (uiop:symbol-call "DEFLATE-KIT/TEST" "RUN-TESTS")
+               (uiop:symbol-call "DEFLATE-KIT/TEST" "RUN-BROTLI-TESTS"))))
