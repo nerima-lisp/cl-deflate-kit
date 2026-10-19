@@ -1,0 +1,14 @@
+Repository: `facebook/zstd`
+Commit: `49cf51799ea051457f57243527aa2058f999f005`
+Source directory: `tests/golden-decompression`
+Copied inputs: `block-128k.zst`, `empty-block.zst`, `rle-first-block.zst`, and `zeroSeq_2B.zst`
+Generated outputs: matching `.bin` files decoded from each copied input
+License: BSD 3-Clause from `facebook/zstd/LICENSE` at commit `49cf51799ea051457f57243527aa2058f999f005`; local copy is `t/zstd-fixtures/LICENSE.facebook-zstd`
+
+Upstream check: this requires an existing `facebook/zstd` checkout and its built `zstd` executable on `PATH`. From the checkout root, run `ZSTD_REPO_DIR="$PWD" tests/cli-tests/decompression/golden.sh`.
+The script tests `tests/golden-decompression` with `zstd -r -t`; it does not pin the `zstd` version.
+
+Local fixture generation and check: from the `cl-deflate-kit` repository root, run `python3 t/zstd-fixtures/generate.py`.
+The script uses the locked nixpkgs `zstd` package to generate the `plain`, `checksum`, `empty`, `rle-256k`, `raw-multiblock`, `multiframe`, `window-9m`, and `dictionary-id-12345` CLI fixtures.
+It also writes `.bin` outputs from copied inputs and verifies existing generated files.
+It does not compare copied `.zst` bytes to the commit above.
