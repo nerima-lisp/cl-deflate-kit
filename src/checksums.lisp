@@ -78,11 +78,24 @@
 
 (defun crc32 (data &key (initial #xffffffff) (start 0) end)
   "Return the IEEE CRC-32 of DATA as an unsigned 32-bit integer."
-  (let ((octets (%octets data))
-        (crc (%u32 initial)))
-    (loop for index fixnum from start below (or end (length octets))
+  (let* ((source (%octets data))
+         (octets (if (typep source
+                            (quote (simple-array (unsigned-byte 8) (*))))
+                     source
+                     (make-array (length source)
+                                 :element-type (quote (unsigned-byte 8))
+                                 :initial-contents source)))
+         (end (or end (length octets)))
+         (table +crc32-table+)
+         (crc (%u32 initial)))
+    (declare (type (simple-array (unsigned-byte 8) (*)) octets)
+             (type fixnum start end)
+             (type (simple-array (unsigned-byte 32) (256)) table)
+             (type (unsigned-byte 32) crc)
+             (optimize (speed 3) (safety 1)))
+    (loop for index fixnum from start below end
           do (setf crc
-                   (logxor (aref +crc32-table+
+                   (logxor (aref table
                                  (logand (logxor crc (aref octets index)) #xff))
                            (ash crc -8))))
     (%u32 (logxor crc #xffffffff))))
