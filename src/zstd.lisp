@@ -237,10 +237,13 @@
                       (value (%zstd-forward-read-bits reader (1- bits)))
                       (count (if (< value maximum)
                                  value
-                                 (- (+ value
-                                       (ash (%zstd-forward-read-bits reader 1)
-                                            (1- bits)))
-                                    maximum)))
+                                 (let ((full-value
+                                         (+ value
+                                            (ash (%zstd-forward-read-bits reader 1)
+                                                 (1- bits)))))
+                                   (if (>= full-value threshold)
+                                       (- full-value maximum)
+                                       full-value))))
                       (normalized (1- count)))
                  (when (> (abs normalized) remaining)
                    (%zstd-invalid :invalid-fse-table
@@ -691,7 +694,7 @@
                                    octets position header-size end)))
              (mask (1- (ash 1 field-bits)))
              (regenerated (logand (ash header -4) mask))
-             (compressed (logand (ash header (+ field-bits 4)) mask))
+             (compressed (logand (ash header (- (+ field-bits 4))) mask))
              (streams (if (zerop size-format) 1 4)))
         (values regenerated compressed streams (+ position header-size)))))
 

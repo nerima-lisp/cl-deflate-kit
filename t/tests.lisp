@@ -479,7 +479,8 @@
                             (list "rle-256k.zst" "rle-256k.bin")
                             (list "raw-multiblock.zst" "raw-multiblock.bin")
                             (list "multilingual.zst" "multilingual.txt")
-                            (list "multiframe.zst" "multiframe.bin")))
+                            (list "multiframe.zst" "multiframe.bin")
+                            (list "ncount.zst" "ncount.txt")))
           (check (equalp (%read-octets (fixture (second pair)))
                          (zstd-decode (%read-octets
                                        (fixture (first pair)))))))

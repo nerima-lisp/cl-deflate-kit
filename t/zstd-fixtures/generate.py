@@ -139,6 +139,20 @@ def main():
         generated["multilingual.txt"] = multilingual
         generated["multilingual.zst"] = work / "multilingual.zst"
 
+        ncount = work / "ncount.txt"
+        ncount.write_bytes(
+            b"".join(
+                f"{index:08d}:{index:02d}:{index * 17:06d}:{index * 7919:08d}:{index:04d}:{index * index * 97:030d}\n".encode()
+                for index in range(5)
+            )[:280]
+        )
+        run_zstd(zstd, "-q", "-f", "-3", "--check", "-o", work / "ncount.zst", ncount)
+        _, _, ncount_header_end = frame_header((work / "ncount.zst").read_bytes())
+        if 2 not in block_types((work / "ncount.zst").read_bytes(), ncount_header_end):
+            raise SystemExit("zstd CLI did not generate a compressed block for ncount.txt")
+        generated["ncount.txt"] = ncount
+        generated["ncount.zst"] = work / "ncount.zst"
+
         checksum = work / "checksum.txt"
         checksum.write_bytes(b"Zstandard frame with an XXH64 content checksum.\n")
         run_zstd(zstd, "-q", "-f", "-3", "--check", "-o", work / "checksum.zst", checksum)
@@ -261,6 +275,7 @@ def main():
 
         for name in (
             "plain.zst",
+            "ncount.zst",
             "checksum.zst",
             "empty.zst",
             "rle-256k.zst",
