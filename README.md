@@ -120,8 +120,8 @@ zlib framing signals `invalid-container-error`. Checksum failures signal
 All three conditions also inherit `deflate-error-message` and
 `deflate-error-position`.
 
-The public API covers raw DEFLATE, zlib, gzip, CRC-32, Adler-32, and stream
-codecs. `deflater-write` returns newly available complete compressed bytes;
+The public API covers raw DEFLATE, zlib, gzip, Brotli, CRC-32, Adler-32, and
+stream codecs. `deflater-write` returns newly available complete compressed bytes;
 `deflater-finish` returns the remaining bytes. `inflate-stream-push` retains
 input chunks, and `inflate-stream-finish` decodes them. ZIP and TAR container
 APIs remain with callers such as aitools; gzip can therefore be used as the
