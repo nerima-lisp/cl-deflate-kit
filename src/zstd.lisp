@@ -64,7 +64,8 @@
 
 (defun %zstd-validate-limit (value)
   (unless (and (integerp value) (not (minusp value)))
-    (error 'type-error :datum value :expected-type '(integer 0 *)))
+    (%zstd-invalid :invalid-limit
+                   (list :value value :expected-type '(integer 0 *))))
   value)
 (defun %zstd-resolve-output-limit
     (max-output max-output-p max-output-bytes max-output-bytes-p unbounded)
@@ -451,7 +452,8 @@
         (setf next after-dictionary)
         (when (plusp dictionary-id)
           (error 'unsupported-container-error :format :zstd
-                 :reason :dictionary-id)))
+                 :reason :dictionary-id
+                 :position (- next dictionary-size))))
       (let ((content-size-size
               (cond ((zerop content-size-flag)
                      (if single-segment-p 1 0))
@@ -1052,7 +1054,8 @@
                 (unless (= expected actual)
                   (error 'checksum-error
                          :format :zstd :reason "content checksum mismatch"
-                         :expected expected :actual actual)))
+                         :expected expected :actual actual
+                         :position position)))
               (setf position after-checksum))))
         position))))
 (defun %zstd-octet-vector-p (value)

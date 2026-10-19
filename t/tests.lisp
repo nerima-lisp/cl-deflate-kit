@@ -576,6 +576,256 @@
                         (inflate-error-reason caught))))))))
     (format t "FR-013 focused tests passed: ~D~%" checks)
     checks)))
+(defun %test-zstd-security-regressions ()
+  (let ((checks 0))
+    (labels ((fixture (name)
+               (asdf:system-relative-pathname
+                "cl-deflate-kit"
+                (format nil "t/zstd-fixtures/~A" name)))
+             (check (passed)
+               (incf checks)
+               (assert passed))
+             (named-check (name passed)
+               (check passed)
+               (format t "Zstandard regression passed: ~A~%" name))
+             (block-start (frame wanted-type)
+               (let* ((descriptor (aref frame 4))
+                      (single-segment (logtest #x20 descriptor))
+                      (content-size-flag (ldb (byte 2 6) descriptor))
+                      (dictionary-size
+                        (aref #(0 1 2 4) (ldb (byte 2 0) descriptor)))
+                      (content-size-size
+                        (case content-size-flag
+                          (0 (if single-segment 1 0))
+                          (1 2)
+                          (2 4)
+                          (3 8)))
+                      (position (+ 5 (if single-segment 0 1)
+                                    dictionary-size content-size-size))
+                      (end (length frame)))
+                 (loop
+                   (when (> (+ position 3) end)
+                     (return nil))
+                   (multiple-value-bind (header after-header)
+                       (deflate-kit::%zstd-read-uint-le frame position 3 end)
+                     (let ((type (ldb (byte 2 1) header))
+                           (size (ash header -3))
+                           (last-p (logbitp 0 header)))
+                       (when (= type wanted-type)
+                         (return position))
+                       (when last-p
+                         (return nil))
+                       (setf position (+ after-header
+                                         (if (= type 1) 1 size))))))))
+             (check-block-limit (name frame type)
+               (let* ((position (block-start frame type))
+                      (end (length frame)))
+                 (unless position
+                   (error "Zstandard fixture has no block of type ~D." type))
+                 (let* ((header
+                          (nth-value 0
+                                     (deflate-kit::%zstd-read-uint-le
+                                      frame position 3 end)))
+                        (size (ash header -3))
+                        (output (deflate-kit::%make-zstd-output (1- size)))
+                        (state
+                          (deflate-kit::make-zstd-frame-state
+                           :window-size (* 128 1024)
+                           :block-max (* 128 1024)))
+                        (caught nil))
+                   (handler-case
+                       (deflate-kit::%zstd-decode-block
+                        frame position end output 0 state)
+                     (zstd-size-limit-exceeded (condition)
+                       (setf caught condition)))
+                   (named-check
+                    name
+                    (and caught
+                         (eq :output-size-limit (inflate-error-reason caught))
+                         (= (1- size) (deflate-output-limit-limit caught))
+                         (= size (inflate-error-observed caught))
+                         (= position (deflate-error-position caught))
+                         (zerop (fill-pointer
+                                 (deflate-kit::zstd-output-data output)))))))))
+      (let* ((window-frame (%read-octets (fixture "window-9m.zst")))
+             (plain-frame (%read-octets (fixture "plain.zst")))
+             (checksum-frame (%read-octets (fixture "checksum.zst")))
+             (dictionary-frame
+               (%read-octets (fixture "dictionary-id-12345.zst")))
+             (raw-frame (%read-octets (fixture "raw-multiblock.zst")))
+             (rle-frame (%read-octets (fixture "rle-first-block.zst")))
+             (window-limit (* 8 1024 1024)))
+        (named-check
+         "zstd-window-default-is-8-mib"
+         (and (= window-limit deflate-kit::+zstd-default-max-window-size-bytes+)
+              (= window-limit
+                 (deflate-kit::zstd-stream-max-window-size-bytes
+                  (make-zstd-stream)))))
+        (let ((caught nil))
+          (handler-case
+              (zstd-decode window-frame :unbounded t)
+            (zstd-size-limit-exceeded (condition)
+              (setf caught condition)))
+          (named-check
+           "zstd-window-default-rejects-9-mib"
+           (and caught
+                (eq :window-size-limit (inflate-error-reason caught))
+                (= window-limit (deflate-output-limit-limit caught))
+                (> (inflate-error-observed caught) window-limit))))
+        (named-check
+         "zstd-window-explicit-override-accepts-9-mib"
+         (= (* 9 1024 1024)
+            (length (zstd-decode
+                     window-frame :unbounded t
+                     :max-window-size-bytes (* 9 1024 1024)))))
+        (progn
+          (let ((caught nil))
+            (handler-case
+                (zstd-decode #() :max-output-bytes "bad")
+              (error (condition)
+                (setf caught condition)))
+            (named-check
+             "zstd-invalid-output-limit-condition"
+             (and (typep caught 'zstd-invalid-data)
+                  (typep caught 'deflate-error)
+                  (not (typep caught 'type-error))
+                  (eq :invalid-limit (inflate-error-reason caught)))))
+          (dolist (case
+                   (list
+                    (cons "zstd-invalid-output-alias-limit-type"
+                          (lambda ()
+                            (zstd-decode #() :max-output 1.5)))
+                    (cons "zstd-invalid-input-limit-type"
+                          (lambda ()
+                            (zstd-decode #() :max-input-bytes 1.5)))
+                    (cons "zstd-invalid-window-limit-type"
+                          (lambda ()
+                            (zstd-decode #() :max-window-size-bytes "bad")))
+                    (cons "zstd-stream-invalid-output-alias-limit-type"
+                          (lambda ()
+                            (make-zstd-stream :max-output "bad")))
+                    (cons "zstd-stream-invalid-output-limit-type"
+                          (lambda ()
+                            (make-zstd-stream :max-output-bytes 1.5)))
+                    (cons "zstd-stream-invalid-input-limit-type"
+                          (lambda ()
+                            (make-zstd-stream :max-input-bytes "bad")))
+                    (cons "zstd-stream-invalid-window-limit-type"
+                          (lambda ()
+                            (make-zstd-stream :max-window-size-bytes 1.5)))))
+            (let ((caught nil))
+              (handler-case
+                  (funcall (cdr case))
+                (error (condition)
+                  (setf caught condition)))
+              (named-check
+               (car case)
+               (and (typep caught 'zstd-invalid-data)
+                    (not (typep caught 'type-error))
+                    (eq :invalid-limit (inflate-error-reason caught)))))))
+        (check-block-limit "zstd-raw-block-output-limit" raw-frame 0)
+        (check-block-limit "zstd-rle-block-output-limit" rle-frame 1)
+        (let* ((output (deflate-kit::%make-zstd-output 32))
+               (state (deflate-kit::make-zstd-frame-state
+                       :window-size (* 128 1024) :block-max (* 128 1024)))
+               (caught nil))
+          (deflate-kit::%zstd-append-output output #(65) 0 1)
+          (handler-case
+              (deflate-kit::%zstd-emit-sequence
+               output 0 0 state #() 0 0 4 65536 29)
+            (zstd-size-limit-exceeded (condition)
+              (setf caught condition)))
+          (named-check
+           "zstd-long-match-output-limit"
+           (and caught
+                (eq :output-size-limit (inflate-error-reason caught))
+                (= 32 (deflate-output-limit-limit caught))
+                (= 65537 (inflate-error-observed caught))
+                (= 29 (deflate-error-position caught))
+                (= 1 (fill-pointer
+                      (deflate-kit::zstd-output-data output))))))
+        (let ((caught nil))
+          (handler-case
+              (deflate-kit::%zstd-huffman-table-from-weights #(12))
+            (zstd-invalid-data (condition)
+              (setf caught condition)))
+          (named-check
+           "zstd-invalid-huffman-weight"
+           (and caught
+                (eq :invalid-huffman-table (inflate-error-reason caught))
+                (eql 12 (inflate-error-detail caught)))))
+        (let* ((state (deflate-kit::make-zstd-frame-state
+                       :window-size 1024 :block-max 1024))
+               (offsets (deflate-kit::zstd-frame-state-offsets state))
+               (first (deflate-kit::%zstd-repeat-offset state 2 1))
+               (first-history (copy-seq offsets))
+               (second (deflate-kit::%zstd-repeat-offset state 3 0))
+               (second-history (copy-seq offsets))
+               (third (deflate-kit::%zstd-repeat-offset state 6 1))
+               (third-history (copy-seq offsets)))
+          (named-check
+           "zstd-repeat-offset-transition"
+           (and (= first 4) (equalp first-history #(4 1 8))
+                (= second 3) (equalp second-history #(3 4 1))
+                (= third 3) (equalp third-history #(3 3 4)))))
+        (let ((caught nil)
+              (frame-end (length plain-frame)))
+          (handler-case
+              (zstd-decode
+               (concatenate '(vector (unsigned-byte 8)) plain-frame #(0)))
+            (zstd-invalid-data (condition)
+              (setf caught condition)))
+          (named-check
+           "zstd-trailing-byte-after-frame"
+           (and caught
+                (eq :truncated-input (inflate-error-reason caught))
+                (= frame-end (deflate-error-position caught)))))
+        (let ((bad-checksum (copy-seq checksum-frame))
+              (caught nil))
+          (setf (aref bad-checksum (1- (length bad-checksum)))
+                (logxor (aref bad-checksum (1- (length bad-checksum))) 1))
+          (handler-case
+              (zstd-decode bad-checksum)
+            (checksum-error (condition)
+              (setf caught condition)))
+          (named-check
+           "zstd-checksum-error-position"
+           (and caught
+                (= (- (length checksum-frame) 4)
+                   (deflate-error-position caught)))))
+        (let* ((descriptor (aref dictionary-frame 4))
+               (dictionary-position (+ 5 (if (logbitp 5 descriptor) 0 1)))
+               (caught nil))
+          (handler-case
+              (zstd-decode dictionary-frame)
+            (unsupported-container-error (condition)
+              (setf caught condition)))
+          (named-check
+           "zstd-dictionary-id-error-position"
+           (and caught
+                (eq :dictionary-id (deflate-error-reason caught))
+                (= dictionary-position (deflate-error-position caught)))))
+        (let* ((max-input (1- (length plain-frame)))
+               (split (floor (length plain-frame) 2))
+               (stream (make-zstd-stream :max-input-bytes max-input))
+               (caught nil))
+          (handler-case
+              (progn
+                (zstd-stream-push stream (subseq plain-frame 0 split))
+                (zstd-stream-push stream (subseq plain-frame split)))
+            (zstd-input-limit-exceeded (condition)
+              (setf caught condition)))
+          (named-check
+           "zstd-input-limit-across-pushes"
+           (and caught
+                (typep caught 'deflate-input-limit)
+                (not (typep caught 'deflate-output-limit))
+                (eq :input-limit (inflate-error-reason caught))
+                (= max-input (deflate-input-limit-limit caught))
+                (= (1+ max-input) (inflate-error-observed caught))
+                (= max-input (deflate-error-position caught)))))))
+    (format t "FR-013 Zstandard security regressions passed: ~D~%" checks)
+    checks))
 
 (defun run-tests ()
   (let* ((input (%octets "hello hello hello hello"))
@@ -707,6 +957,6 @@
       (progn
         (%test-zstd-predefined-tables)
         (%test-zstd-api-contract)
-        (%test-zstd)))
+        (progn (%test-zstd) (%test-zstd-security-regressions))))
     (format t "FR-002 focused tests passed~%")
     t))
