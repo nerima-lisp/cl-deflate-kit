@@ -26,8 +26,6 @@
    #:make-inflate-stream #:inflate-stream-push #:inflate-stream-finish
    #:make-deflate-stream #:deflate-stream-push #:deflate-stream-flush
    #:deflate-stream-finish
- #:brotli-decode #:brotli-decompress #:make-brotli-stream
- #:brotli-stream-push #:brotli-stream-finish #:brotli-invalid-data
- #:brotli-size-limit-exceeded #:brotli-error-reason #:brotli-error-detail
- #:brotli-size-limit-exceeded-reason
- #:brotli-size-limit-exceeded-observed))
+   #:brotli-decode #:make-brotli-stream
+   #:brotli-stream-push #:brotli-stream-finish #:brotli-invalid-data
+   #:brotli-size-limit-exceeded))
