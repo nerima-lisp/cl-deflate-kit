@@ -40,31 +40,44 @@
   ll-table
   of-table
   ml-table
-  (offsets #(1 4 8)))
+  (offsets (vector 1 4 8)))
 (defstruct (zstd-stream
             (:constructor %make-zstd-stream
-                (&key chunks max-output-bytes max-window-size-bytes finished-p)))
-  chunks max-output-bytes max-window-size-bytes finished-p)
+                (&key chunks max-output-bytes max-input-bytes input-length
+                      max-window-size-bytes finished-p)))
+  chunks max-output-bytes max-input-bytes (input-length 0)
+  max-window-size-bytes finished-p)
 
 (defun %zstd-invalid (reason &optional detail position)
   (error 'zstd-invalid-data :message "Invalid Zstandard data."
          :reason reason :detail detail :position position))
 
-(defun %zstd-limit-exceeded (reason limit observed)
+(defun %zstd-limit-exceeded (reason limit observed &optional position)
   (error 'zstd-size-limit-exceeded :message "Zstandard size limit exceeded."
-         :reason reason :limit limit :observed observed))
+         :reason reason :limit limit :observed observed :position position))
 
 (defun %zstd-validate-limit (value name)
   (declare (ignore name))
   (unless (and (integerp value) (not (minusp value)))
     (error 'type-error :datum value :expected-type '(integer 0 *)))
   value)
+(defun %zstd-resolve-output-limit
+    (max-output max-output-p max-output-bytes max-output-bytes-p unbounded)
+  (when (and unbounded (or max-output-p max-output-bytes-p))
+    (error 'deflate-error
+           :message "UNBOUNDED cannot be combined with a Zstandard output limit."))
+  (when (and max-output-p max-output-bytes-p)
+    (error 'deflate-error :message "specify only one Zstandard output limit."))
+  (let ((limit (if max-output-p max-output max-output-bytes)))
+    (when limit
+      (%zstd-validate-limit limit :max-output-bytes))
+    (if unbounded nil (or limit +zstd-default-max-output-bytes+))))
 
-(defun %zstd-check-output (output count)
-  (let ((observed (+ (fill-pointer (zstd-output-data output)) count)))
-    (when (> observed (zstd-output-limit output))
-      (%zstd-limit-exceeded :output-size-limit
-                            (zstd-output-limit output) observed))
+(defun %zstd-check-output (output count &optional position)
+  (let* ((observed (+ (fill-pointer (zstd-output-data output)) count))
+         (limit (zstd-output-limit output)))
+    (when (and limit (> observed limit))
+      (%zstd-limit-exceeded :output-size-limit limit observed position))
     observed))
 
 (defun %zstd-reserve-output (output count)
@@ -73,9 +86,9 @@
          (end (%zstd-check-output output count))
          (capacity (array-total-size data)))
     (when (> end capacity)
-      (let ((new-capacity
-              (min (zstd-output-limit output)
-                   (max end (* 2 (max capacity 1))))))
+      (let* ((limit (zstd-output-limit output))
+             (grown (max end (* 2 (max capacity 1))))
+             (new-capacity (if limit (min limit grown) grown)))
         (setf data (adjust-array data new-capacity :fill-pointer start)
               (zstd-output-data output) data)))
     (setf (fill-pointer (zstd-output-data output)) end)
@@ -94,20 +107,17 @@
           do (setf (aref (zstd-output-data output) index) byte))
     start))
 
-(defun %zstd-backref-output (output offset count)
+(defun %zstd-backref-output (output offset count &optional position)
   (let* ((data (zstd-output-data output))
          (start (%zstd-reserve-output output count)))
     (when (or (zerop offset) (> offset start))
-      (%zstd-invalid :offset-out-of-range offset))
+      (%zstd-invalid :offset-out-of-range offset position))
     (loop for index from start below (+ start count)
           do (setf (aref data index) (aref data (- index offset))))
     start))
 
 (defun %zstd-output-length (output)
   (fill-pointer (zstd-output-data output)))
-
-(defun %zstd-output-slice (output start)
-  (subseq (zstd-output-data output) start (%zstd-output-length output)))
 
 (defun %zstd-require-bytes (octets position count end)
   (declare (ignore octets))
@@ -128,13 +138,15 @@
           (+ position count)))
 
 (defun %zstd-forward-read-bits (reader count)
-  (when (or (< count 0) (> count 16))
-    (%zstd-invalid :invalid-fse-bit-width count))
-  (let ((position (zstd-forward-bits-position reader)))
+  (let* ((position (zstd-forward-bits-position reader))
+         (input-position (+ (zstd-forward-bits-start reader)
+                            (floor position 8))))
+    (when (or (< count 0) (> count 16))
+      (%zstd-invalid :invalid-fse-bit-width count input-position))
     (when (> (+ position count)
              (* 8 (- (zstd-forward-bits-end reader)
                      (zstd-forward-bits-start reader))))
-      (%zstd-invalid :truncated-fse-header position))
+      (%zstd-invalid :truncated-fse-header position input-position))
     (let ((value 0)
           (octets (zstd-forward-bits-octets reader))
           (start (zstd-forward-bits-start reader)))
@@ -155,24 +167,29 @@
     (make-zstd-reverse-bits
      :octets octets :start start
      :position (+ (* 8 (- end start 1)) marker-bit))))
+(defun %zstd-reverse-input-position (reader)
+  (let ((position (zstd-reverse-bits-position reader)))
+    (+ (zstd-reverse-bits-start reader)
+       (if (zerop position) 0 (floor (1- position) 8)))))
 
 (defun %zstd-reverse-read-bits (reader count)
-  (when (or (< count 0) (> count 32))
-    (%zstd-invalid :invalid-bit-width count))
-  (when (> count (zstd-reverse-bits-position reader))
-    (%zstd-invalid :truncated-bitstream count))
-  (let* ((value 0)
-         (position (zstd-reverse-bits-position reader))
-         (start (- position count))
-         (octets (zstd-reverse-bits-octets reader))
-         (base (zstd-reverse-bits-start reader)))
-    (dotimes (bit-index count)
-      (let* ((absolute (+ start bit-index))
-             (byte (aref octets (+ base (floor absolute 8))))
-             (bit (ldb (byte 1 (mod absolute 8)) byte)))
-        (setf value (logior value (ash bit bit-index)))))
-    (setf (zstd-reverse-bits-position reader) start)
-    value))
+  (let ((position (zstd-reverse-bits-position reader))
+        (input-position (%zstd-reverse-input-position reader)))
+    (when (or (< count 0) (> count 32))
+      (%zstd-invalid :invalid-bit-width count input-position))
+    (when (> count position)
+      (%zstd-invalid :truncated-bitstream count input-position))
+    (let* ((value 0)
+           (start (- position count))
+           (octets (zstd-reverse-bits-octets reader))
+           (base (zstd-reverse-bits-start reader)))
+      (dotimes (bit-index count)
+        (let* ((absolute (+ start bit-index))
+               (byte (aref octets (+ base (floor absolute 8))))
+               (bit (ldb (byte 1 (mod absolute 8)) byte)))
+          (setf value (logior value (ash bit bit-index)))))
+      (setf (zstd-reverse-bits-position reader) start)
+      value)))
 
 (defun %zstd-highbit (value)
   (1- (integer-length value)))
@@ -448,18 +465,20 @@
         (when single-segment-p
           (setf window-size content-size)))
       (when (> window-size max-window)
-        (%zstd-limit-exceeded :window-size-limit max-window window-size))
+        (%zstd-limit-exceeded :window-size-limit max-window window-size next))
       (when (and content-size
+                 (zstd-output-limit output)
                  (> content-size
-                    (- (zstd-output-limit output) (%zstd-output-length output))))
+                    (- (zstd-output-limit output)
+                       (%zstd-output-length output))))
         (%zstd-limit-exceeded :output-size-limit
                               (zstd-output-limit output)
-                              (+ (%zstd-output-length output) content-size)))
+                              (+ (%zstd-output-length output) content-size)
+                              next))
       (values next
               (make-zstd-frame-state
                :window-size window-size
-               :block-max (min window-size +zstd-max-block-size+)
-               :offsets #(1 4 8))
+               :block-max (min window-size +zstd-max-block-size+))
               content-size checksum-p))))
 
 (defun %zstd-parse-fse-table (octets position end max-symbol max-log)
@@ -467,30 +486,33 @@
       (%zstd-read-normalized-counts octets position end max-symbol max-log)
     (values (%zstd-build-fse-table counts log) next)))
 
-(defun %zstd-fse-entry-at (table state)
+(defun %zstd-fse-entry-at (table state &optional position)
   (when (or (< state 0) (>= state (length (zstd-fse-table-entries table))))
-    (%zstd-invalid :invalid-fse-state state))
+    (%zstd-invalid :invalid-fse-state state position))
   (aref (zstd-fse-table-entries table) state))
 
 (defun %zstd-fse-update-state (table state reader)
-  (let* ((entry (%zstd-fse-entry-at table state))
+  (let* ((entry (%zstd-fse-entry-at
+                 table state (%zstd-reverse-input-position reader)))
          (next (+ (zstd-fse-entry-baseline entry)
-                  (%zstd-reverse-read-bits reader (zstd-fse-entry-bits entry)))))
+                  (%zstd-reverse-read-bits
+                   reader (zstd-fse-entry-bits entry)))))
     (when (or (< next 0) (>= next (length (zstd-fse-table-entries table))))
-      (%zstd-invalid :invalid-fse-state next))
+      (%zstd-invalid :invalid-fse-state next
+                     (%zstd-reverse-input-position reader)))
     next))
 
-(defun %zstd-huffman-table-from-weights (weights)
+(defun %zstd-huffman-table-from-weights (weights &optional position)
   (when (or (zerop (length weights)) (> (length weights) 255))
-    (%zstd-invalid :invalid-huffman-table (length weights)))
+    (%zstd-invalid :invalid-huffman-table (length weights) position))
   (let ((weight-sum 0))
     (loop for weight across weights
           do (when (> weight 11)
-               (%zstd-invalid :invalid-huffman-table weight))
+               (%zstd-invalid :invalid-huffman-table weight position))
              (when (plusp weight)
                (incf weight-sum (ash 1 (1- weight)))))
     (when (zerop weight-sum)
-      (%zstd-invalid :invalid-huffman-table :empty-tree))
+      (%zstd-invalid :invalid-huffman-table :empty-tree position))
     (let* ((max-bits (integer-length weight-sum))
            (target (ash 1 max-bits))
            (last-weight (- target weight-sum)))
@@ -498,11 +520,12 @@
                 (not (and (plusp last-weight)
                           (= (logand last-weight (1- last-weight)) 0))))
         (%zstd-invalid :invalid-huffman-table
-                       (list :weight-sum weight-sum :last-weight last-weight)))
+                       (list :weight-sum weight-sum :last-weight last-weight)
+                       position))
       (let* ((all-weights (make-array (1+ (length weights))))
              (lengths (make-array (1+ (length weights)) :initial-element 0))
              (counts (make-array (1+ max-bits) :initial-element 0))
-             (codes (make-hash-table :test #'equal))
+             (codes (make-hash-table :test #'eql))
              (last-bits (integer-length last-weight))
              (code 0))
         (replace all-weights weights)
@@ -511,11 +534,13 @@
               for symbol from 0
               do (when (> weight max-bits)
                    (%zstd-invalid :invalid-huffman-table
-                                  (list :symbol symbol :weight weight)))
+                                  (list :symbol symbol :weight weight)
+                                  position))
                  (when (plusp weight)
                    (let ((number-of-bits (+ max-bits 1 (- weight))))
                      (when (or (<= number-of-bits 0) (> number-of-bits 11))
-                       (%zstd-invalid :invalid-huffman-table number-of-bits))
+                       (%zstd-invalid :invalid-huffman-table number-of-bits
+                                      position))
                      (setf (aref lengths symbol) number-of-bits)
                      (incf (aref counts number-of-bits)))))
         (loop for number-of-bits from max-bits downto 1
@@ -523,11 +548,13 @@
                    (setf code (ash (+ code (aref counts number-of-bits)) -1))
                    (loop for symbol below (length lengths)
                          when (= (aref lengths symbol) number-of-bits)
-                           do (setf (gethash (cons next-code number-of-bits) codes)
+                           do (setf (gethash (logior (ash 1 number-of-bits)
+                                                    next-code)
+                                             codes)
                                     symbol)
                               (incf next-code))))
         (unless (= code 1)
-          (%zstd-invalid :invalid-huffman-table :incomplete-tree))
+          (%zstd-invalid :invalid-huffman-table :incomplete-tree position))
         (make-zstd-huffman-table :codes codes :max-bits max-bits)))))
 
 (defun %zstd-huffman-symbol (reader table)
@@ -537,22 +564,25 @@
           do (setf code (+ (ash code 1)
                            (%zstd-reverse-read-bits reader 1)))
              (multiple-value-bind (symbol found-p)
-                 (gethash (cons code number-of-bits) codes)
+                 (gethash (logior (ash 1 number-of-bits) code) codes)
                (when found-p (return-from %zstd-huffman-symbol symbol))))
-    (%zstd-invalid :invalid-huffman-code)))
+    (%zstd-invalid :invalid-huffman-code nil
+                   (%zstd-reverse-input-position reader))))
 
 (defun %zstd-huffman-decode-stream (octets start end table output output-start count)
   (if (zerop count)
       (unless (= start end)
         (let ((reader (%zstd-reverse-reader octets start end)))
           (unless (zerop (zstd-reverse-bits-position reader))
-            (%zstd-invalid :invalid-huffman-bitstream :unexpected-empty-stream))))
+            (%zstd-invalid :invalid-huffman-bitstream :unexpected-empty-stream
+                           (%zstd-reverse-input-position reader)))))
       (let ((reader (%zstd-reverse-reader octets start end)))
         (loop for index below count
               do (setf (aref output (+ output-start index))
                        (%zstd-huffman-symbol reader table)))
         (unless (zerop (zstd-reverse-bits-position reader))
-          (%zstd-invalid :invalid-huffman-bitstream :unused-bits))))
+          (%zstd-invalid :invalid-huffman-bitstream :unused-bits
+                         (%zstd-reverse-input-position reader)))))
   (+ output-start count))
 
 (defun %zstd-decode-huffman-weights (octets start end table)
@@ -564,12 +594,17 @@
     (labels ((emit (state)
                (when (= (length weights) 255)
                  (%zstd-invalid :invalid-huffman-tree-description
-                                :too-many-weights))
+                                :too-many-weights
+                                (%zstd-reverse-input-position reader)))
                (vector-push-extend
-                (zstd-fse-entry-symbol (%zstd-fse-entry-at table state))
+                (zstd-fse-entry-symbol
+                 (%zstd-fse-entry-at
+                  table state (%zstd-reverse-input-position reader)))
                 weights))
              (advance (state)
-               (let* ((entry (%zstd-fse-entry-at table state))
+               (let* ((entry (%zstd-fse-entry-at
+                              table state
+                              (%zstd-reverse-input-position reader)))
                       (bit-count (zstd-fse-entry-bits entry))
                       (available (zstd-reverse-bits-position reader))
                       (underflow (> bit-count available))
@@ -580,10 +615,12 @@
                       (next (+ (zstd-fse-entry-baseline entry) bits)))
                  (when (or (< next 0)
                            (>= next (length (zstd-fse-table-entries table))))
-                   (%zstd-invalid :invalid-fse-state next))
+                   (%zstd-invalid :invalid-fse-state next
+                                  (%zstd-reverse-input-position reader)))
                  (values next underflow)))
              (finish ()
-               (values (%zstd-huffman-table-from-weights weights)
+               (values (%zstd-huffman-table-from-weights
+                        weights (%zstd-reverse-input-position reader))
                        (length weights))))
       (loop
         do (emit state1)
@@ -612,28 +649,31 @@
                       (if (evenp index)
                           (ash byte -4)
                           (ldb (byte 4 0) byte)))))
-            (values (%zstd-huffman-table-from-weights weights)
+            (values (%zstd-huffman-table-from-weights weights position)
                     (+ next byte-count))))
         (let ((weight-size header))
           (when (zerop weight-size)
-            (%zstd-invalid :invalid-huffman-tree-description :empty-weights))
+            (%zstd-invalid :invalid-huffman-tree-description :empty-weights
+                           position))
           (%zstd-require-bytes octets next weight-size end)
           (multiple-value-bind (fse-table weight-start)
               (%zstd-parse-fse-table octets next (+ next weight-size) 11 6)
             (when (>= weight-start (+ next weight-size))
-              (%zstd-invalid :invalid-huffman-tree-description :empty-fse-stream))
+              (%zstd-invalid :invalid-huffman-tree-description
+                             :empty-fse-stream position))
             (multiple-value-bind (huffman-table count)
                 (%zstd-decode-huffman-weights
                  octets weight-start (+ next weight-size) fse-table)
               (declare (ignore count))
               (values huffman-table (+ next weight-size))))))))
 
-(defun %zstd-check-block-growth (output block-start block-max count)
-  (%zstd-check-output output count)
+(defun %zstd-check-block-growth
+    (output block-start block-max count &optional position)
+  (%zstd-check-output output count position)
   (when (> (+ (- (%zstd-output-length output) block-start) count)
            block-max)
     (%zstd-invalid :block-output-size-limit
-                   (list :maximum block-max :additional count))))
+                   (list :maximum block-max :additional count) position)))
 
 (defun %zstd-read-literals-header (octets position end block-type size-format)
   (if (<= block-type 1)
@@ -664,10 +704,11 @@
         (when (> regenerated (zstd-frame-state-block-max frame-state))
           (%zstd-invalid :literal-size-limit
                          (list :size regenerated
-                               :maximum (zstd-frame-state-block-max frame-state))))
+                               :maximum (zstd-frame-state-block-max frame-state))
+                         position))
         (%zstd-check-block-growth output block-start
                                   (zstd-frame-state-block-max frame-state)
-                                  regenerated)
+                                  regenerated position)
         (let ((literals (make-array regenerated :element-type '(unsigned-byte 8))))
           (if (<= block-type 1)
               (if (zerop block-type)
@@ -693,7 +734,7 @@
                     (setf huffman-table
                           (zstd-frame-state-huffman-table frame-state)))
                 (unless huffman-table
-                  (%zstd-invalid :treeless-literals-without-table))
+                  (%zstd-invalid :treeless-literals-without-table nil content-start))
                 (if (= stream-count 1)
                     (progn
                       (%zstd-huffman-decode-stream
@@ -717,7 +758,8 @@
                                         (minusp last-stream))
                                 (%zstd-invalid :invalid-huffman-jump-table
                                                (list :sizes first-size second-size
-                                                     third-size stream-bytes)))
+                                                     third-size stream-bytes)
+                                               content-start))
                               (let ((offset stream-start))
                                 (%zstd-huffman-decode-stream
                                  octets offset (+ offset first-size) huffman-table
@@ -770,7 +812,8 @@
        (values previous position))
     (otherwise (%zstd-invalid :invalid-sequence-mode mode position))))
 
-(defun %zstd-repeat-offset (frame-state offset-value literal-length)
+(defun %zstd-repeat-offset
+    (frame-state offset-value literal-length &optional position)
   (let* ((offsets (zstd-frame-state-offsets frame-state))
          (offset nil)
          (history-index nil))
@@ -782,15 +825,14 @@
          (1 (setf history-index 1))
          (2 (setf history-index 2))
          (3 (setf offset (1- (aref offsets 0))))
-         (otherwise (%zstd-invalid :invalid-repeat-offset offset-value))))
+         (otherwise (%zstd-invalid :invalid-repeat-offset offset-value position))))
       (t (setf history-index (1- offset-value))))
     (when history-index
       (setf offset (aref offsets history-index))
       (loop for index downfrom history-index above 0
             do (setf (aref offsets index) (aref offsets (1- index))))
       (setf (aref offsets 0) offset))
-    (when (and (> offset-value 3)
-               (or (zerop literal-length) (plusp literal-length)))
+    (when (> offset-value 3)
       (setf (aref offsets 2) (aref offsets 1)
             (aref offsets 1) (aref offsets 0)
             (aref offsets 0) offset))
@@ -799,32 +841,35 @@
             (aref offsets 1) (aref offsets 0)
             (aref offsets 0) offset))
     (when (or (null offset) (zerop offset))
-      (%zstd-invalid :offset-out-of-range offset))
+      (%zstd-invalid :offset-out-of-range offset position))
     offset))
 
 (defun %zstd-emit-sequence (output frame-start block-start frame-state
                             literals literal-position literal-length offset-value
-                            match-length)
+                            match-length &optional input-position)
   (when (> (+ literal-position literal-length) (length literals))
     (%zstd-invalid :sequence-literals-out-of-range
                    (list :position literal-position :length literal-length
-                         :available (length literals))))
+                         :available (length literals))
+                   input-position))
   (%zstd-check-block-growth output block-start
                             (zstd-frame-state-block-max frame-state)
-                            literal-length)
+                            literal-length input-position)
   (%zstd-append-output output literals literal-position
                        (+ literal-position literal-length))
-  (let* ((offset (%zstd-repeat-offset frame-state offset-value literal-length))
+  (let* ((offset (%zstd-repeat-offset frame-state offset-value literal-length
+                                      input-position))
          (available (- (%zstd-output-length output) frame-start)))
     (when (or (>= offset (zstd-frame-state-window-size frame-state))
               (> offset available))
       (%zstd-invalid :offset-out-of-range
                      (list :offset offset :available available
-                           :window (zstd-frame-state-window-size frame-state))))
+                           :window (zstd-frame-state-window-size frame-state))
+                     input-position))
     (%zstd-check-block-growth output block-start
                               (zstd-frame-state-block-max frame-state)
-                              match-length)
-    (%zstd-backref-output output offset match-length))
+                              match-length input-position)
+    (%zstd-backref-output output offset match-length input-position))
   (+ literal-position literal-length))
 
 (defun %zstd-decode-sequences (octets position end output frame-start block-start
@@ -847,10 +892,10 @@
           (literal-position 0))
       (when (zerop sequence-count)
         (unless (= next end)
-          (%zstd-invalid :unexpected-sequence-data next))
+          (%zstd-invalid :unexpected-sequence-data next next))
         (%zstd-check-block-growth output block-start
                                   (zstd-frame-state-block-max frame-state)
-                                  (length literals))
+                                  (length literals) position)
         (%zstd-append-output output literals 0 (length literals))
         (return-from %zstd-decode-sequences end))
       (multiple-value-bind (modes after-modes)
@@ -890,9 +935,9 @@
                   (zstd-frame-state-of-table frame-state) of-table
                   (zstd-frame-state-ml-table frame-state) ml-table)
             (loop for index below sequence-count
-                  do (let* ((ll-entry (%zstd-fse-entry-at ll-table ll-state))
-                            (of-entry (%zstd-fse-entry-at of-table of-state))
-                            (ml-entry (%zstd-fse-entry-at ml-table ml-state))
+                  do (let* ((ll-entry (%zstd-fse-entry-at ll-table ll-state (%zstd-reverse-input-position reader)))
+                            (of-entry (%zstd-fse-entry-at of-table of-state (%zstd-reverse-input-position reader)))
+                            (ml-entry (%zstd-fse-entry-at ml-table ml-state (%zstd-reverse-input-position reader)))
                             (ll-code (zstd-fse-entry-symbol ll-entry))
                             (of-code (zstd-fse-entry-symbol of-entry))
                             (ml-code (zstd-fse-entry-symbol ml-entry)))
@@ -900,7 +945,8 @@
                                     (<= 0 of-code 31)
                                     (<= 0 ml-code 52))
                          (%zstd-invalid :invalid-sequence-code
-                                        (list ll-code of-code ml-code)))
+                                        (list ll-code of-code ml-code)
+                                        (%zstd-reverse-input-position reader)))
                        (let* ((offset-value
                                 (+ (ash 1 of-code)
                                    (%zstd-reverse-read-bits reader of-code)))
@@ -916,7 +962,7 @@
                                (%zstd-emit-sequence
                                 output frame-start block-start frame-state literals
                                 literal-position literal-length offset-value
-                                match-length)))
+                                match-length (%zstd-reverse-input-position reader))))
                        (unless (= index (1- sequence-count))
                          (setf ll-state (%zstd-fse-update-state
                                          ll-table ll-state reader)
@@ -926,12 +972,13 @@
                                          of-table of-state reader)))))
             (unless (zerop (zstd-reverse-bits-position reader))
               (%zstd-invalid :trailing-sequence-bits
-                             (zstd-reverse-bits-position reader)))
+                             (zstd-reverse-bits-position reader)
+                             (%zstd-reverse-input-position reader)))
             (when (< literal-position (length literals))
               (let ((remaining (- (length literals) literal-position)))
-                (%zstd-check-block-growth output block-start
-                                          (zstd-frame-state-block-max frame-state)
-                                          remaining)
+                (%zstd-check-block-growth
+                 output block-start (zstd-frame-state-block-max frame-state)
+                 remaining (%zstd-reverse-input-position reader))
                 (%zstd-append-output output literals literal-position
                                      (length literals))))
             end))))))
@@ -959,13 +1006,13 @@
                 (0
                  (%zstd-require-bytes octets content-start size end)
                  (%zstd-check-block-growth output (%zstd-output-length output)
-                                           block-max size)
+                                           block-max size position)
                  (%zstd-append-output output octets content-start content-end)
                  content-end)
                 (1
                  (%zstd-require-bytes octets content-start 1 end)
                  (%zstd-check-block-growth output (%zstd-output-length output)
-                                           block-max size)
+                                           block-max size position)
                  (%zstd-repeat-output output (aref octets content-start) size)
                  (1+ content-start))
                 (2
@@ -1010,68 +1057,109 @@
        (loop for octet across value
              always (typep octet '(unsigned-byte 8)))))
 (defun zstd-decode
-    (octets &key (max-output-bytes +zstd-default-max-output-bytes+)
-                 (max-window-size-bytes +zstd-default-max-window-size-bytes+))
-  (%zstd-validate-limit max-output-bytes :max-output-bytes)
-  (%zstd-validate-limit max-window-size-bytes :max-window-size-bytes)
-  (unless (%zstd-octet-vector-p octets)
-    (%zstd-invalid :invalid-input-type (type-of octets)))
-  (let* ((end (length octets))
-         (position 0)
-         (output (%make-zstd-output max-output-bytes)))
-    (when (zerop end)
-      (%zstd-invalid :empty-input))
-    (loop while (< position end)
-          do (multiple-value-bind (magic after-magic)
-                 (%zstd-read-uint-le octets position 4 end)
-               (let ((next
-                       (cond
-                         ((= magic +zstd-magic+)
-                          (%zstd-decode-frame octets after-magic end output
-                                              max-window-size-bytes))
-                         ((<= #x184d2a50 magic #x184d2a5f)
-                          (multiple-value-bind (size payload-start)
-                              (%zstd-read-uint-le octets after-magic 4 end)
-                            (%zstd-require-bytes octets payload-start size end)
-                            (+ payload-start size)))
-                         (t (%zstd-invalid :invalid-frame-magic magic position)))))
-                 (unless (> next position)
-                   (%zstd-invalid :no-frame-progress position))
-                 (setf position next))))
-    (subseq (zstd-output-data output) 0 (%zstd-output-length output))))
+    (octets &key (max-output-bytes nil max-output-bytes-p)
+                 (max-output nil max-output-p)
+                 unbounded
+                 (max-window-size-bytes +zstd-default-max-window-size-bytes+)
+                 max-input-bytes)
+  (let ((output-limit
+          (%zstd-resolve-output-limit max-output max-output-p
+                                      max-output-bytes max-output-bytes-p
+                                      unbounded)))
+    (%zstd-validate-limit max-window-size-bytes :max-window-size-bytes)
+    (when max-input-bytes
+      (%zstd-validate-limit max-input-bytes :max-input-bytes))
+    (unless (vectorp octets)
+      (%zstd-invalid :invalid-input-type (type-of octets) 0))
+    (let ((end (length octets)))
+      (when (and max-input-bytes (> end max-input-bytes))
+        (%zstd-limit-exceeded :input-size-limit max-input-bytes end
+                              max-input-bytes))
+      (unless (%zstd-octet-vector-p octets)
+        (%zstd-invalid :invalid-input-type (type-of octets) 0))
+      (when (zerop end)
+        (%zstd-invalid :empty-input nil 0))
+      (let ((position 0)
+            (output (%make-zstd-output output-limit)))
+        (loop while (< position end)
+              do (multiple-value-bind (magic after-magic)
+                     (%zstd-read-uint-le octets position 4 end)
+                   (let ((next
+                           (cond
+                             ((= magic +zstd-magic+)
+                              (%zstd-decode-frame octets after-magic end output
+                                                  max-window-size-bytes))
+                             ((<= #x184d2a50 magic #x184d2a5f)
+                              (multiple-value-bind (size payload-start)
+                                  (%zstd-read-uint-le octets after-magic 4 end)
+                                (%zstd-require-bytes octets payload-start size end)
+                                (+ payload-start size)))
+                             (t (%zstd-invalid :invalid-frame-magic magic
+                                               position)))))
+                     (unless (> next position)
+                       (%zstd-invalid :no-frame-progress position))
+                     (setf position next))))
+        (subseq (zstd-output-data output) 0 (%zstd-output-length output))))))
 (defun make-zstd-stream
-    (&key (max-output-bytes +zstd-default-max-output-bytes+)
+    (&key (max-output-bytes nil max-output-bytes-p)
+          (max-output nil max-output-p)
+          unbounded
+          max-input-bytes
           (max-window-size-bytes +zstd-default-max-window-size-bytes+))
-  (%zstd-validate-limit max-output-bytes :max-output-bytes)
-  (%zstd-validate-limit max-window-size-bytes :max-window-size-bytes)
-  (%make-zstd-stream :chunks nil
-                     :max-output-bytes max-output-bytes
-                     :max-window-size-bytes max-window-size-bytes
-                     :finished-p nil))
+  (let ((output-limit
+          (%zstd-resolve-output-limit max-output max-output-p
+                                      max-output-bytes max-output-bytes-p
+                                      unbounded)))
+    (when max-input-bytes
+      (%zstd-validate-limit max-input-bytes :max-input-bytes))
+    (%zstd-validate-limit max-window-size-bytes :max-window-size-bytes)
+    (%make-zstd-stream :chunks nil
+                       :max-output-bytes output-limit
+                       :max-input-bytes max-input-bytes
+                       :input-length 0
+                       :max-window-size-bytes max-window-size-bytes
+                       :finished-p nil)))
 (defun zstd-stream-push (stream chunk)
   (unless (zstd-stream-p stream)
     (error 'type-error :datum stream :expected-type 'zstd-stream))
   (when (zstd-stream-finished-p stream)
-    (%zstd-invalid :stream-finished))
-  (unless (%zstd-octet-vector-p chunk)
-    (%zstd-invalid :invalid-input-type (type-of chunk)))
-  (push chunk (zstd-stream-chunks stream))
+    (%zstd-invalid :stream-finished nil (zstd-stream-input-length stream)))
+  (unless (vectorp chunk)
+    (%zstd-invalid :invalid-input-type (type-of chunk)
+                   (zstd-stream-input-length stream)))
+  (let* ((chunk-length (length chunk))
+         (observed (+ (zstd-stream-input-length stream) chunk-length))
+         (limit (zstd-stream-max-input-bytes stream)))
+    (when (and limit (> observed limit))
+      (%zstd-limit-exceeded :input-size-limit limit observed limit))
+    (unless (%zstd-octet-vector-p chunk)
+      (%zstd-invalid :invalid-input-type (type-of chunk)
+                     (zstd-stream-input-length stream)))
+    (push (copy-seq chunk) (zstd-stream-chunks stream))
+    (setf (zstd-stream-input-length stream) observed))
   nil)
 (defun zstd-stream-finish (stream)
   (unless (zstd-stream-p stream)
     (error 'type-error :datum stream :expected-type 'zstd-stream))
   (when (zstd-stream-finished-p stream)
-    (%zstd-invalid :stream-finished))
+    (%zstd-invalid :stream-finished nil (zstd-stream-input-length stream)))
   (setf (zstd-stream-finished-p stream) t)
   (let* ((chunks (nreverse (zstd-stream-chunks stream)))
-         (length (loop for chunk in chunks sum (length chunk)))
+         (length (zstd-stream-input-length stream))
          (input (make-array length :element-type '(unsigned-byte 8)))
          (position 0))
     (dolist (chunk chunks)
       (replace input chunk :start1 position)
       (incf position (length chunk)))
-    (zstd-decode input
-                 :max-output-bytes (zstd-stream-max-output-bytes stream)
-                 :max-window-size-bytes
-                 (zstd-stream-max-window-size-bytes stream))))
-(setf (fdefinition 'zstd-decompress) #'zstd-decode)
+    (let ((output-limit (zstd-stream-max-output-bytes stream)))
+      (if output-limit
+          (zstd-decode input
+                       :max-output-bytes output-limit
+                       :max-input-bytes (zstd-stream-max-input-bytes stream)
+                       :max-window-size-bytes
+                       (zstd-stream-max-window-size-bytes stream))
+          (zstd-decode input
+                       :unbounded t
+                       :max-input-bytes (zstd-stream-max-input-bytes stream)
+                       :max-window-size-bytes
+                       (zstd-stream-max-window-size-bytes stream))))))
