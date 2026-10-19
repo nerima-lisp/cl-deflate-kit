@@ -6,7 +6,7 @@
    #:deflate-input-limit #:deflate-input-limit-limit
    #:inflate-invalid-data #:inflate-error-reason #:inflate-error-detail
    #:inflate-size-limit-exceeded #:inflate-error-observed
-   #:zstd-invalid-data #:zstd-size-limit-exceeded
+   #:zstd-invalid-data #:zstd-size-limit-exceeded #:zstd-input-limit-exceeded
    #:invalid-container-error #:unsupported-container-error #:checksum-error
    #:deflate-error-format #:deflate-error-reason
    #:invalid-compression-level #:invalid-compression-level-level

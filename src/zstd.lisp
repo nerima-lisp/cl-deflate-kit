@@ -4,6 +4,7 @@
 (defconstant +zstd-max-block-size+ (* 128 1024))
 (defconstant +zstd-default-max-window-size-bytes+ (* 8 1024 1024))
 (defconstant +zstd-default-max-output-bytes+ (* 8 1024 1024))
+(defconstant +zstd-default-max-input-bytes+ (* 16 1024 1024))
 (defconstant +zstd-u64-mask+ #xffffffffffffffff)
 
 (defparameter +zstd-default-ll-distribution+
@@ -55,6 +56,11 @@
 (defun %zstd-limit-exceeded (reason limit observed &optional position)
   (error 'zstd-size-limit-exceeded :message "Zstandard size limit exceeded."
          :reason reason :limit limit :observed observed :position position))
+(defun %zstd-input-limit-exceeded (limit observed &optional position)
+  (error 'zstd-input-limit-exceeded
+         :message "Zstandard input size limit exceeded."
+         :reason :input-limit :limit limit :observed observed
+         :position position))
 
 (defun %zstd-validate-limit (value)
   (unless (and (integerp value) (not (minusp value)))
@@ -63,10 +69,11 @@
 (defun %zstd-resolve-output-limit
     (max-output max-output-p max-output-bytes max-output-bytes-p unbounded)
   (when (and unbounded (or max-output-p max-output-bytes-p))
-    (error 'deflate-error
-           :message "UNBOUNDED cannot be combined with a Zstandard output limit."))
+    (%zstd-invalid :conflicting-output-limits
+                   "UNBOUNDED cannot be combined with a Zstandard output limit."))
   (when (and max-output-p max-output-bytes-p)
-    (error 'deflate-error :message "specify only one Zstandard output limit."))
+    (%zstd-invalid :conflicting-output-limits
+                   "Specify only one Zstandard output limit."))
   (let ((limit (if max-output-p max-output max-output-bytes)))
     (when limit
       (%zstd-validate-limit limit))
@@ -1054,20 +1061,18 @@
                  (max-output nil max-output-p)
                  unbounded
                  (max-window-size-bytes +zstd-default-max-window-size-bytes+)
-                 max-input-bytes)
+                 (max-input-bytes +zstd-default-max-input-bytes+))
   (let ((output-limit
           (%zstd-resolve-output-limit max-output max-output-p
                                       max-output-bytes max-output-bytes-p
                                       unbounded)))
     (%zstd-validate-limit max-window-size-bytes)
-    (when max-input-bytes
-      (%zstd-validate-limit max-input-bytes))
+    (%zstd-validate-limit max-input-bytes)
     (unless (vectorp octets)
       (%zstd-invalid :invalid-input-type (type-of octets) 0))
     (let ((end (length octets)))
-      (when (and max-input-bytes (> end max-input-bytes))
-        (%zstd-limit-exceeded :input-size-limit max-input-bytes end
-                              max-input-bytes))
+      (when (> end max-input-bytes)
+        (%zstd-input-limit-exceeded max-input-bytes end max-input-bytes))
       (unless (%zstd-octet-vector-p octets)
         (%zstd-invalid :invalid-input-type (type-of octets) 0))
       (when (zerop end)
@@ -1097,14 +1102,13 @@
     (&key (max-output-bytes nil max-output-bytes-p)
           (max-output nil max-output-p)
           unbounded
-          max-input-bytes
+          (max-input-bytes +zstd-default-max-input-bytes+)
           (max-window-size-bytes +zstd-default-max-window-size-bytes+))
   (let ((output-limit
           (%zstd-resolve-output-limit max-output max-output-p
                                       max-output-bytes max-output-bytes-p
                                       unbounded)))
-    (when max-input-bytes
-      (%zstd-validate-limit max-input-bytes))
+    (%zstd-validate-limit max-input-bytes)
     (%zstd-validate-limit max-window-size-bytes)
     (%make-zstd-stream :chunks nil
                        :max-output-bytes output-limit
@@ -1123,8 +1127,8 @@
   (let* ((chunk-length (length chunk))
          (observed (+ (zstd-stream-input-length stream) chunk-length))
          (limit (zstd-stream-max-input-bytes stream)))
-    (when (and limit (> observed limit))
-      (%zstd-limit-exceeded :input-size-limit limit observed limit))
+    (when (> observed limit)
+      (%zstd-input-limit-exceeded limit observed limit))
     (unless (%zstd-octet-vector-p chunk)
       (%zstd-invalid :invalid-input-type (type-of chunk)
                      (zstd-stream-input-length stream)))

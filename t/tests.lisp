@@ -336,16 +336,20 @@
              (expect-input-limit (thunk limit observed)
                (let ((caught nil))
                  (handler-case (funcall thunk)
-                   (zstd-size-limit-exceeded (condition)
+                   (zstd-input-limit-exceeded (condition)
                      (setf caught condition)))
                  (check
                   (and (typep caught 'deflate-error)
-                       (typep caught 'deflate-output-limit)
-                       (eq :input-size-limit (inflate-error-reason caught))
-                       (eql limit (deflate-output-limit-limit caught))
+                       (typep caught 'deflate-input-limit)
+                       (not (typep caught 'deflate-output-limit))
+                       (eq :input-limit (inflate-error-reason caught))
+                       (eql limit (deflate-input-limit-limit caught))
                        (eql observed (inflate-error-observed caught))
                        (eql limit (deflate-error-position caught))
-                       (search "Zstandard" (princ-to-string caught)))))))
+                       (search (format nil "byte ~D" limit)
+                               (princ-to-string caught))
+                       (search "Zstandard input size limit exceeded"
+                               (princ-to-string caught)))))))
       (let* ((plain (%read-octets (fixture "plain.txt")))
              (plain-frame (%read-octets (fixture "plain.zst")))
              (frame-length (length plain-frame))
@@ -355,11 +359,29 @@
                                        :initial-element #x57)))
         (check (equalp plain
                        (zstd-decode plain-frame :max-output (length plain))))
-        (rejects 'deflate-error
-                 (lambda ()
-                   (zstd-decode plain-frame
-                                :max-output (length plain)
-                                :max-output-bytes (length plain))))
+        (let ((default-input-size (* 16 1024 1024)))
+          (check (= default-input-size
+                    deflate-kit::+zstd-default-max-input-bytes+))
+          (check (= default-input-size
+                    (deflate-kit::zstd-stream-max-input-bytes
+                     (make-zstd-stream))))
+          (expect-input-limit
+           (lambda ()
+             (zstd-decode
+              (make-array (1+ default-input-size)
+                          :element-type '(unsigned-byte 8)
+                          :initial-element 0)))
+           default-input-size (1+ default-input-size)))
+        (let ((caught nil))
+          (handler-case
+              (zstd-decode plain-frame
+                           :max-output (length plain)
+                           :max-output-bytes (length plain))
+            (zstd-invalid-data (condition)
+              (setf caught condition)))
+          (check (and (typep caught 'zstd-invalid-data)
+                      (eq :conflicting-output-limits
+                          (inflate-error-reason caught)))))
         (check (equalp large-output
                        (zstd-decode
                         large-frame :unbounded t
@@ -400,6 +422,7 @@
               (setf caught condition)))
           (check (and (typep caught 'deflate-error)
                       (eq :truncated-input (inflate-error-reason caught))
+                      (listp (inflate-error-detail caught))
                       (integerp (deflate-error-position caught))))))
       (format t "FR-013 Zstandard API checks passed: ~D~%" checks)
       checks)))

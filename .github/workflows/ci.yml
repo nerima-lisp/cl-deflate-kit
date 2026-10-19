@@ -12,3 +12,6 @@ jobs:
           log="$RUNNER_TEMP/nix-flake-check.log"
           nix flake check -L 2>&1 | tee "$log"
           grep -Eq 'Brotli focused tests passed \([1-9][0-9]* checks; 3 LUT CRC assertions; 5 multilingual fixture assertions\)' "$log"
+          grep -Eq 'RFC 8878 predefined FSE table checks passed: [1-9][0-9]*' "$log"
+          grep -Eq 'FR-013 Zstandard API checks passed: [1-9][0-9]*' "$log"
+          grep -Eq 'FR-013 focused tests passed: [1-9][0-9]*' "$log"

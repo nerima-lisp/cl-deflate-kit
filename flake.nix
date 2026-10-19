@@ -78,6 +78,7 @@
             runtimeInputs = [
               pkgs.sbcl
               cl-weave.packages.${system}.default
+              pkgs.gzip
             ];
             text = ''export CL_SOURCE_REGISTRY="$PWD//:${
               cl-weave.packages.${system}.default
