@@ -678,17 +678,51 @@
             (length (zstd-decode
                      window-frame :unbounded t
                      :max-window-size-bytes (* 9 1024 1024)))))
-        (let ((caught nil))
-          (handler-case
-              (zstd-decode #() :max-output-bytes "bad")
-            (error (condition)
-              (setf caught condition)))
-          (named-check
-           "zstd-invalid-output-limit-condition"
-           (and (typep caught 'zstd-invalid-data)
-                (typep caught 'deflate-error)
-                (not (typep caught 'type-error))
-                (eq :invalid-limit (inflate-error-reason caught)))))
+        (progn
+          (let ((caught nil))
+            (handler-case
+                (zstd-decode #() :max-output-bytes "bad")
+              (error (condition)
+                (setf caught condition)))
+            (named-check
+             "zstd-invalid-output-limit-condition"
+             (and (typep caught 'zstd-invalid-data)
+                  (typep caught 'deflate-error)
+                  (not (typep caught 'type-error))
+                  (eq :invalid-limit (inflate-error-reason caught)))))
+          (dolist (case
+                   (list
+                    (cons "zstd-invalid-output-alias-limit-type"
+                          (lambda ()
+                            (zstd-decode #() :max-output 1.5)))
+                    (cons "zstd-invalid-input-limit-type"
+                          (lambda ()
+                            (zstd-decode #() :max-input-bytes 1.5)))
+                    (cons "zstd-invalid-window-limit-type"
+                          (lambda ()
+                            (zstd-decode #() :max-window-size-bytes "bad")))
+                    (cons "zstd-stream-invalid-output-alias-limit-type"
+                          (lambda ()
+                            (make-zstd-stream :max-output "bad")))
+                    (cons "zstd-stream-invalid-output-limit-type"
+                          (lambda ()
+                            (make-zstd-stream :max-output-bytes 1.5)))
+                    (cons "zstd-stream-invalid-input-limit-type"
+                          (lambda ()
+                            (make-zstd-stream :max-input-bytes "bad")))
+                    (cons "zstd-stream-invalid-window-limit-type"
+                          (lambda ()
+                            (make-zstd-stream :max-window-size-bytes 1.5)))))
+            (let ((caught nil))
+              (handler-case
+                  (funcall (cdr case))
+                (error (condition)
+                  (setf caught condition)))
+              (named-check
+               (car case)
+               (and (typep caught 'zstd-invalid-data)
+                    (not (typep caught 'type-error))
+                    (eq :invalid-limit (inflate-error-reason caught)))))))
         (check-block-limit "zstd-raw-block-output-limit" raw-frame 0)
         (check-block-limit "zstd-rle-block-output-limit" rle-frame 1)
         (let* ((output (deflate-kit::%make-zstd-output 32))
