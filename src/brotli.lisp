@@ -19,6 +19,13 @@
              (format stream "Brotli size limit exceeded~@[ at byte ~D~]: ~A"
                      (deflate-error-position condition)
                      (deflate-error-message condition)))))
+(define-condition brotli-input-limit-exceeded (deflate-input-limit)
+  ((reason :initarg :reason :reader inflate-error-reason)
+   (observed :initarg :observed :reader inflate-error-observed))
+  (:report (lambda (condition stream)
+             (format stream "Brotli input limit exceeded~@[ at byte ~D~]: ~A"
+                     (deflate-error-position condition)
+                     (deflate-error-message condition)))))
 
 (defun %brotli-error (message reason &optional detail)
   (error 'brotli-invalid-data
@@ -856,11 +863,12 @@
          (current (fill-pointer input))
          (chunk-length (length octets))
          (observed (+ current chunk-length))
-         (limit (brotli-stream-max-input-bytes stream)))
+         (limit (brotli-stream-max-input-bytes stream))
+         (input-position (min observed limit)))
     (when (> observed limit)
-      (error 'brotli-size-limit-exceeded
+      (error 'brotli-input-limit-exceeded
              :message "The Brotli input exceeded its size limit."
-             :position limit
+             :position input-position
              :reason :input-limit
              :limit limit
              :observed observed))

@@ -3,6 +3,7 @@
   (:export
    #:deflate-error #:deflate-error-message #:deflate-error-position
    #:deflate-output-limit #:deflate-output-limit-limit
+   #:deflate-input-limit #:deflate-input-limit-limit
    #:inflate-invalid-data #:inflate-error-reason #:inflate-error-detail
    #:inflate-size-limit-exceeded #:inflate-error-observed
    #:invalid-container-error #:unsupported-container-error #:checksum-error
@@ -28,4 +29,4 @@
    #:deflate-stream-finish
    #:brotli-decode #:make-brotli-stream
    #:brotli-stream-push #:brotli-stream-finish #:brotli-invalid-data
-   #:brotli-size-limit-exceeded))
+   #:brotli-size-limit-exceeded #:brotli-input-limit-exceeded))

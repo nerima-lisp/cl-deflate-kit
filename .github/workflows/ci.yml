@@ -6,4 +6,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
-      - run: nix flake check
+      - name: Nix flake check
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/nix-flake-check.log"
+          nix flake check -L 2>&1 | tee "$log"
+          grep -Eq 'Brotli focused tests passed \([1-9][0-9]* checks; 3 LUT CRC assertions; 5 multilingual fixture assertions\)' "$log"

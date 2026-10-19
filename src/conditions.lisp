@@ -10,6 +10,8 @@
 
 (define-condition deflate-output-limit (deflate-error)
   ((limit :initarg :limit :reader deflate-output-limit-limit)))
+(define-condition deflate-input-limit (deflate-error)
+  ((limit :initarg :limit :reader deflate-input-limit-limit)))
 
 (define-condition inflate-invalid-data (deflate-error)
   ((reason :initarg :reason :reader inflate-error-reason)
@@ -21,5 +23,6 @@
 
 (export '(deflate-error deflate-error-message deflate-error-position
           deflate-output-limit deflate-output-limit-limit
+          deflate-input-limit deflate-input-limit-limit
           inflate-invalid-data inflate-error-reason inflate-error-detail
           inflate-size-limit-exceeded inflate-error-observed))
