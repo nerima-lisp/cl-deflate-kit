@@ -1,9 +1,12 @@
 # cl-deflate-kit
 
-Pure Common Lisp RFC 1951 DEFLATE, RFC 1950 zlib, and RFC 1952 gzip codecs.
-The public package is `deflate-kit`. It has no Lisp dependencies and supports
-bounded decompression, checksums, one-shot APIs, and raw DEFLATE/INFLATE stream
-APIs.
+Pure Common Lisp implementations of RFC 1951 DEFLATE, RFC 1950 zlib, and RFC
+1952 gzip, with RFC 7932 Brotli decompression. The public package is
+`deflate-kit`. It has no Lisp dependencies and supports bounded decompression,
+checksums, one-shot APIs, and stream APIs.
+
+This README describes the current source tree. The changelog marks changes that
+have not yet appeared in a tagged release.
 
 With the system available to ASDF, a raw DEFLATE round trip looks like this:
 
@@ -34,25 +37,34 @@ the limit explicitly; `:unbounded` cannot be combined with an output limit.
 the consumed-input value. `:size-hint` reserves output capacity without
 limiting the decoded size. Otherwise, the second value from `inflate` is the
 number of input bytes consumed from `:start`.
-The output-limit keywords differ by API:
+The limit keywords differ by API:
 
-| API | Output-limit keywords |
+| API | Limit keywords |
 | --- | --- |
 | `inflate` | `:max-output-bytes`, `:max-output`, `:unbounded` |
 | `make-inflate-stream` | `:max-output-bytes`, `:max-output`, `:unbounded` |
 | `gzip-decode` | `:max-output-bytes`, `:max-output`, `:unbounded` |
 | `gzip-decode-prefix` | Required `:max-output` |
 | `zlib-decode` | `:max-output-bytes`, `:max-output` |
+| `brotli-decode` | `:max-output-bytes`, `:max-output`, `:unbounded` |
+| `make-brotli-stream` | `:max-output-bytes`, `:max-output`, `:unbounded`, `:max-input-bytes` |
 
 All APIs except `gzip-decode-prefix` default to a 16 MiB output limit. The gzip
 limit applies to the aggregate output of all decoded members. `gzip-decode`
 also accepts `:allow-trailing-padding`, which defaults to `NIL`.
 
+`brotli-decode` returns decoded octets. For chunked input, use
+`make-brotli-stream`, pass chunks to `brotli-stream-push`, and call
+`brotli-stream-finish` to decode them. Brotli output and stream input limits
+default to 16 MiB. `:max-input-bytes` bounds the compressed bytes retained by a
+Brotli stream. `:max-output` aliases `:max-output-bytes`; specify only one.
+Pass `:unbounded t` to disable the output limit; it cannot be combined with an
+output-limit keyword.
+
 `gzip-decode` returns the concatenated decoded octets from all members as its
 primary value and a list of `gzip-member-header` structures as its second
 value. The list contains one header per member, in input order.
-Existing callers that use only the primary value continue to receive the
-decoded octets. The structure exposes these accessors:
+The structure exposes these accessors:
 
 | Accessor | Value |
 | --- | --- |
@@ -87,12 +99,26 @@ least one member has decoded and every remaining byte is zero. Padding adds no
 member or header. Empty or all-zero input, zero-valued bytes between members,
 and nonzero or mixed trailing data still signal `invalid-container-error`.
 
-The default decompression limit is 16 MiB, aggregated across concatenated gzip
-members. Exceeding it signals
+Exceeding gzip's aggregate 16 MiB output limit signals
 `inflate-size-limit-exceeded`, a subtype of `deflate-output-limit`.
 Malformed raw DEFLATE payloads signal `inflate-invalid-data`; malformed gzip or
 zlib framing signals `invalid-container-error`. Checksum failures signal
 `checksum-error`.
+
+`brotli-invalid-data` reports malformed Brotli data and is a subtype of
+`deflate-error`. `brotli-size-limit-exceeded` is a subtype of
+`deflate-output-limit`; `brotli-input-limit-exceeded` is a subtype of
+`deflate-input-limit`. The limit conditions expose `:output-limit` and
+`:input-limit` through `inflate-error-reason`, respectively. Their readers are:
+
+| Condition | Additional readers |
+| --- | --- |
+| `brotli-invalid-data` | `inflate-error-reason`, `inflate-error-detail` |
+| `brotli-size-limit-exceeded` | `deflate-output-limit-limit`, `inflate-error-reason`, `inflate-error-observed` |
+| `brotli-input-limit-exceeded` | `deflate-input-limit-limit`, `inflate-error-reason`, `inflate-error-observed` |
+
+All three conditions also inherit `deflate-error-message` and
+`deflate-error-position`.
 
 The public API covers raw DEFLATE, zlib, gzip, CRC-32, Adler-32, and stream
 codecs. `deflater-write` returns newly available complete compressed bytes;

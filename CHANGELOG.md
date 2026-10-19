@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Add the public Brotli decoder API: `brotli-decode`, `make-brotli-stream`,
+  `brotli-stream-push`, and `brotli-stream-finish`.
+- Support `:max-output-bytes`, its `:max-output` alias, `:max-input-bytes`, and
+  `:unbounded` for Brotli decoding. One-shot decoding accepts the output-limit
+  options; stream construction also accepts the compressed-input limit.
+- Report malformed data as `brotli-invalid-data`, output overflow as
+  `brotli-size-limit-exceeded`, and compressed-input overflow as
+  `brotli-input-limit-exceeded`. Their readers and parent conditions are listed
+  in the README.
+
 ## 0.3.0
 
 - Improve raw DEFLATE and INFLATE throughput against the `aitools` codec at

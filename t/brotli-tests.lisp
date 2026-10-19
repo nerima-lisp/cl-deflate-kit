@@ -1,13 +1,16 @@
 (in-package #:deflate-kit/test)
 
 (defvar *brotli-assertion-count* 0)
+(defvar *brotli-category-counts* nil)
 
 (defun %brotli-octets (&rest octets)
   (make-array (length octets) :element-type '(unsigned-byte 8)
                             :initial-contents octets))
 
-(defun %brotli-check (test description)
+(defun %brotli-check (test description &optional category)
   (incf *brotli-assertion-count*)
+  (when category
+    (incf (gethash category *brotli-category-counts* 0)))
   (unless test
     (error "Brotli test failed: ~A" description)))
 
@@ -23,8 +26,8 @@
   (and (typep actual '(vector (unsigned-byte 8)))
        (equalp expected actual)))
 
-(defun %brotli-check-output (actual expected description)
-  (%brotli-check (%brotli-output-p actual expected) description)
+(defun %brotli-check-output (actual expected description &optional category)
+  (%brotli-check (%brotli-output-p actual expected) description category)
   actual)
 
 (defun %brotli-fixture (name)
@@ -45,6 +48,7 @@
 
 (defun run-brotli-tests ()
   (let ((*brotli-assertion-count* 0)
+        (*brotli-category-counts* (make-hash-table :test #'eq))
         (empty (%brotli-fixture "empty"))
         (empty-br (%brotli-fixture "empty.br"))
         (simple (%brotli-fixture "simple.txt"))
@@ -139,15 +143,15 @@
       (%brotli-check-output (brotli-decode large-br) large
                             "large CLI fixture decodes")
       (%brotli-check-output (brotli-decode cyrillic-br) cyrillic
-                            "Cyrillic q11 CLI fixture decodes")
+                            "Cyrillic q11 CLI fixture decodes" :multilingual)
       (%brotli-check-output (brotli-decode cyrillic-q5-br) cyrillic
-                            "Cyrillic q5 CLI fixture decodes")
+                            "Cyrillic q5 CLI fixture decodes" :multilingual)
       (%brotli-check-output (brotli-decode hebrew-br) hebrew
-                            "Hebrew q11 CLI fixture decodes")
+                            "Hebrew q11 CLI fixture decodes" :multilingual)
       (%brotli-check-output (brotli-decode arabic-br) arabic
-                            "Arabic q11 CLI fixture decodes")
+                            "Arabic q11 CLI fixture decodes" :multilingual)
       (%brotli-check-output (brotli-decode cjk-br) cjk
-                            "CJK q11 CLI fixture decodes")
+                            "CJK q11 CLI fixture decodes" :multilingual)
 
       (dolist (width '(1 2 7 31 43))
         (%brotli-stream-decode-chunked simple-br simple width
@@ -195,15 +199,15 @@
         (%brotli-check
          (and (= 256 (length deflate-kit::+brotli-utf8-lut0+))
               (= #x8e91efb7 (crc32 deflate-kit::+brotli-utf8-lut0+)))
-         "RFC 7932 section 7.1 UTF-8 LUT0 CRC-32")
+         "RFC 7932 section 7.1 UTF-8 LUT0 CRC-32" :lut-crc)
         (%brotli-check
          (and (= 256 (length deflate-kit::+brotli-utf8-lut1+))
               (= #xd01a32f4 (crc32 deflate-kit::+brotli-utf8-lut1+)))
-         "RFC 7932 section 7.1 UTF-8 LUT1 CRC-32")
+         "RFC 7932 section 7.1 UTF-8 LUT1 CRC-32" :lut-crc)
         (%brotli-check
          (and (= 256 (length lut2))
               (= #x0dd7a0d6 (crc32 lut2)))
-         "RFC 7932 section 7.1 UTF-8 LUT2 CRC-32"))
+         "RFC 7932 section 7.1 UTF-8 LUT2 CRC-32" :lut-crc))
       (%brotli-check (= 43 (deflate-kit::%brotli-literal-context 0 #xab 0))
                      "LSB6 literal context uses the low six bits")
       (%brotli-check (= 42 (deflate-kit::%brotli-literal-context 1 #xab 0))
@@ -428,23 +432,25 @@
 
       (let ((condition
               (%brotli-check-condition
-               'brotli-size-limit-exceeded
+               'brotli-input-limit-exceeded
                (lambda ()
-                 (let ((stream (make-brotli-stream :max-input-bytes 2)))
+                 (let ((stream (make-brotli-stream :max-input-bytes 5)))
                    (brotli-stream-push stream (subseq simple-br 0 2))
-                   (brotli-stream-push stream (subseq simple-br 2 5))))
+                   (brotli-stream-push stream (subseq simple-br 2 6))))
                "stream input limit is enforced")))
-        (%brotli-check (typep condition 'deflate-output-limit)
-                       "Brotli size-limit inherits DEFLATE-OUTPUT-LIMIT")
+        (%brotli-check
+         (and (typep condition 'deflate-input-limit)
+              (= 5 (deflate-input-limit-limit condition)))
+         "Brotli input limit inherits DEFLATE-INPUT-LIMIT and reports its configured limit")
         (%brotli-check (eq :input-limit (inflate-error-reason condition))
                        "input limit exposes the shared error reason")
         (%brotli-check
-         (= 5 (inflate-error-observed condition))
+         (= 6 (inflate-error-observed condition))
          "input limit reports the full attempted input total")
-        (%brotli-check (= 2 (deflate-error-position condition))
+        (%brotli-check (= 5 (deflate-error-position condition))
                        "input limit reports the first excess byte position")
         (%brotli-check
-         (and (search "byte 2" (format nil "~A" condition))
+         (and (search "byte 5" (format nil "~A" condition))
               (search (deflate-error-message condition)
                       (format nil "~A" condition)))
          "input limit report includes position and message"))
@@ -496,8 +502,13 @@
         (check-invalid-reason condition :conflicting-output-limits
                               "stream unbounded and max-output-bytes conflict by contract"))
 
-      (unless (plusp *brotli-assertion-count*)
-        (error "Brotli test suite ran no checks"))
-      (format t "Brotli focused tests passed (~D checks; 3 LUT CRC assertions; 5 multilingual fixture assertions)~%"
-              *brotli-assertion-count*)
+      (progn
+        (unless (and (plusp *brotli-assertion-count*)
+                     (plusp (gethash :lut-crc *brotli-category-counts* 0))
+                     (plusp (gethash :multilingual *brotli-category-counts* 0)))
+          (error "Brotli test suite ran no checks in one or more required categories"))
+        (format t "Brotli focused tests passed (~D checks; ~D LUT CRC assertions; ~D multilingual fixture assertions)~%"
+                *brotli-assertion-count*
+                (gethash :lut-crc *brotli-category-counts* 0)
+                (gethash :multilingual *brotli-category-counts* 0)))
       t)))
