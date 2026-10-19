@@ -1,28 +1,54 @@
 (in-package #:deflate-kit)
 
 (defconstant +brotli-default-max-output-bytes+ (* 16 1024 1024))
+(defconstant +brotli-default-max-input-bytes+ (* 16 1024 1024))
+(defvar *brotli-current-position* nil)
 
 (define-condition brotli-invalid-data (deflate-error)
-  ((reason :initarg :reason :reader brotli-error-reason)
-   (detail :initarg :detail :initform nil :reader brotli-error-detail))
+  ((reason :initarg :reason :reader inflate-error-reason)
+   (detail :initarg :detail :initform nil :reader inflate-error-detail))
   (:report (lambda (condition stream)
              (format stream "Brotli error~@[ at byte ~D~]: ~A"
                      (deflate-error-position condition)
                      (deflate-error-message condition)))))
 
 (define-condition brotli-size-limit-exceeded (deflate-output-limit)
-  ((reason :initarg :reason :reader brotli-size-limit-exceeded-reason)
-   (observed :initarg :observed
-             :reader brotli-size-limit-exceeded-observed)))
+  ((reason :initarg :reason :reader inflate-error-reason)
+   (observed :initarg :observed :reader inflate-error-observed))
+  (:report (lambda (condition stream)
+             (format stream "Brotli size limit exceeded~@[ at byte ~D~]: ~A"
+                     (deflate-error-position condition)
+                     (deflate-error-message condition)))))
 
 (defun %brotli-error (message reason &optional detail)
-  (error 'brotli-invalid-data :message message :reason reason :detail detail))
+  (error 'brotli-invalid-data
+         :message message
+         :position *brotli-current-position*
+         :reason reason
+         :detail detail))
 
 (defun %brotli-octet-vector-p (value)
   (and (vectorp value)
        (every (lambda (octet)
                 (and (integerp octet) (<= 0 octet 255)))
               value)))
+(defun %brotli-normalize-output-limit
+    (max-output-bytes max-output-bytes-p max-output max-output-p unbounded)
+  (when (and unbounded (or max-output-bytes-p max-output-p))
+    (%brotli-error "UNBOUNDED cannot be combined with an output limit."
+                   :conflicting-output-limits))
+  (when (and max-output-bytes-p max-output-p)
+    (%brotli-error "Specify only one output limit."
+                   :conflicting-output-limits))
+  (let ((limit (cond (unbounded nil)
+                     (max-output-p max-output)
+                     (max-output-bytes-p max-output-bytes)
+                     (t +brotli-default-max-output-bytes+))))
+    (unless (or unbounded
+                (and (integerp limit) (>= limit 0)))
+      (%brotli-error "MAX-OUTPUT-BYTES must be a non-negative integer."
+                     :invalid-output-limit))
+    limit))
 
 (defstruct (brotli-bit-reader
              (:constructor %make-brotli-bit-reader (octets)))
@@ -38,6 +64,7 @@
         do (let ((position (brotli-bit-reader-position reader))
                  (octets (brotli-bit-reader-octets reader)))
              (when (>= position (length octets))
+               (setf *brotli-current-position* position)
                (%brotli-error "The Brotli stream ended prematurely."
                               :truncated-input position))
              (setf (brotli-bit-reader-buffer reader)
@@ -46,7 +73,8 @@
                                 (brotli-bit-reader-bits reader)))
                    (brotli-bit-reader-position reader) (1+ position)
                    (brotli-bit-reader-bits reader)
-                   (+ (brotli-bit-reader-bits reader) 8))))
+                   (+ (brotli-bit-reader-bits reader) 8)
+                   *brotli-current-position* (1+ position))))
   (let ((value (logand (brotli-bit-reader-buffer reader)
                        (if (zerop count) 0 (1- (ash 1 count))))))
     (setf (brotli-bit-reader-buffer reader)
@@ -72,24 +100,29 @@
     (%brotli-error "Data follows the final Brotli meta-block."
                    :trailing-input (brotli-bit-reader-position reader))))
 
-(defun %brotli-reverse-bits (value width)
-  (loop with result = 0
-        for index below width
-        do (setf result (logior (ash result 1)
-                                (ldb (byte 1 index) value)))
-        finally (return result)))
-
 (defstruct (brotli-huffman-table
              (:constructor %make-brotli-huffman-table))
-  codes
+  counts
+  first-codes
+  first-symbols
+  symbols
   (max-length 0)
   single-symbol)
 
 (defun %brotli-build-huffman-table (lengths &key (require-complete t))
   (let* ((max-length (loop for length across lengths maximize length))
-         (counts (make-array (1+ max-length) :initial-element 0))
-         (next-code (make-array (1+ max-length) :initial-element 0))
-         (codes (make-hash-table :test #'equal))
+         (counts (make-array (1+ max-length)
+                             :element-type (quote (unsigned-byte 16))
+                             :initial-element 0))
+         (first-codes (make-array (1+ max-length)
+                                  :element-type (quote (unsigned-byte 16))
+                                  :initial-element 0))
+         (first-symbols (make-array (1+ max-length)
+                                    :element-type (quote (unsigned-byte 16))
+                                    :initial-element 0))
+         (next-symbols (make-array (1+ max-length)
+                                   :element-type (quote (unsigned-byte 16))
+                                   :initial-element 0))
          (code 0)
          (symbol-count 0)
          (single-symbol nil)
@@ -114,33 +147,41 @@
       (%brotli-error "A Brotli Huffman tree is incomplete." :incomplete-tree))
     (loop for bits from 1 to max-length
           do (setf code (ash (+ code (aref counts (1- bits))) 1)
-                   (aref next-code bits) code))
-    (loop for symbol below (length lengths)
-          for length = (aref lengths symbol)
-          unless (zerop length)
-            do (let ((canonical (aref next-code length)))
-                 (incf (aref next-code length))
-                 (setf (gethash (cons (%brotli-reverse-bits canonical length)
-                                      length)
-                                codes)
-                       symbol)))
-    (%make-brotli-huffman-table :codes codes :max-length max-length
-                                :single-symbol (and (= symbol-count 1)
-                                                    single-symbol))))
+                   (aref first-codes bits) code))
+    (let ((symbol-offset 0)
+          (symbols (make-array symbol-count
+                               :element-type (quote (unsigned-byte 16)))))
+      (loop for bits from 1 to max-length
+            do (setf (aref first-symbols bits) symbol-offset
+                     (aref next-symbols bits) symbol-offset)
+               (incf symbol-offset (aref counts bits)))
+      (loop for symbol below (length lengths)
+            for length = (aref lengths symbol)
+            unless (zerop length)
+              do (let ((offset (aref next-symbols length)))
+                   (setf (aref symbols offset) symbol)
+                   (incf (aref next-symbols length))))
+      (%make-brotli-huffman-table
+       :counts counts :first-codes first-codes :first-symbols first-symbols
+       :symbols symbols :max-length max-length
+       :single-symbol (and (= symbol-count 1) single-symbol)))))
 
 (defun %brotli-decode-symbol (reader table)
   (unless (null (brotli-huffman-table-single-symbol table))
     (return-from %brotli-decode-symbol
       (brotli-huffman-table-single-symbol table)))
-  (let ((code 0))
+  (let ((code 0)
+        (counts (brotli-huffman-table-counts table))
+        (first-codes (brotli-huffman-table-first-codes table))
+        (first-symbols (brotli-huffman-table-first-symbols table))
+        (symbols (brotli-huffman-table-symbols table)))
     (loop for length from 1 to (brotli-huffman-table-max-length table)
-          do (setf code (logior code
-                                (ash (%brotli-read-bits reader 1)
-                                     (1- length))))
-             (multiple-value-bind (symbol found-p)
-                 (gethash (cons code length)
-                          (brotli-huffman-table-codes table))
-               (when found-p (return-from %brotli-decode-symbol symbol))))
+          do (setf code (+ (ash code 1) (%brotli-read-bits reader 1)))
+             (let* ((offset (- code (aref first-codes length)))
+                    (count (aref counts length)))
+               (when (and (<= 0 offset) (< offset count))
+                 (return-from %brotli-decode-symbol
+                   (aref symbols (+ (aref first-symbols length) offset))))))
     (%brotli-error "The Brotli stream contains an invalid Huffman code."
                    :invalid-huffman-code)))
 
@@ -200,15 +241,12 @@
                     (loop repeat run
                           do (setf (aref lengths position) length)
                              (incf position))
-                    (progn
-                      (when (plusp length)
-                        (decf space (* run (ash 32768 (- length))))
-                        (when (minusp space)
-                          (%brotli-error "A Brotli Huffman tree is oversubscribed."
-                                         :oversubscribed-tree)))
-                      (setf repeat-kind code repeat-count total))))
-                 (t (%brotli-error "A Brotli code-length symbol is invalid."
-                                   :invalid-code-length-symbol))))
+                    (when (plusp length)
+                      (decf space (* run (ash 32768 (- length))))
+                      (when (minusp space)
+                        (%brotli-error "A Brotli Huffman tree is oversubscribed."
+                                       :oversubscribed-tree)))
+                    (setf repeat-kind code repeat-count total)))))
       (let ((space 32768))
         (loop for length across lengths
               when (plusp length)
@@ -245,8 +283,18 @@
                                         (aref #(1 2 3 3) index))))
                   do (setf (aref lengths (aref symbols index)) length)))
           (if (= count 1)
-              (%make-brotli-huffman-table
-               :codes nil :max-length 0 :single-symbol (aref symbols 0))
+              (let ((empty (make-array 1
+                                       :element-type '(unsigned-byte 16)
+                                       :initial-element 0)))
+                (%make-brotli-huffman-table
+                 :counts empty
+                 :first-codes empty
+                 :first-symbols empty
+                 :symbols (make-array 1
+                                      :element-type '(unsigned-byte 16)
+                                      :initial-element (aref symbols 0))
+                 :max-length 0
+                 :single-symbol (aref symbols 0)))
               (%brotli-build-huffman-table lengths)))
         (let ((lengths (%brotli-read-complex-huffman-lengths
                         reader alphabet-size kind)))
@@ -295,8 +343,7 @@
         state)))
 
 (defun %brotli-switch-block-if-needed (reader state)
-  (when (and (> (brotli-block-state-type-count state)
-                1)
+  (when (and (> (brotli-block-state-type-count state) 1)
              (zerop (brotli-block-state-remaining state)))
     (let* ((type-code (%brotli-decode-symbol
                        reader (brotli-block-state-type-tree state)))
@@ -308,9 +355,6 @@
                (0 previous)
                (1 (mod (1+ current) type-count))
                (otherwise (- type-code 2)))))
-      (when (>= next-type type-count)
-        (%brotli-error "A Brotli block type is outside its declared range."
-                       :invalid-block-type))
       (setf (brotli-block-state-previous-type state) current
             (brotli-block-state-current-type state) next-type
             (brotli-block-state-remaining state)
@@ -371,41 +415,43 @@
           (%brotli-error "A Brotli context map omits or exceeds a tree index."
                          :invalid-context-map)))) map))
 
-(defun %brotli-utf8-lut0 (byte)
-  (cond
-    ((< byte 32) (if (member byte '(9 10 13)) 4 0))
-    ((= byte 32) 8)
-    ((<= byte 47)
-     (case byte
-       ((34 39) 16) (37 20) (40 24) (41 28) (44 32) (46 36)
-       (otherwise 12)))
-    ((<= byte 57) 44)
-    ((<= byte 64)
-     (case byte
-       ((58 59) 32) (60 24) (61 40) (62 28) (otherwise 12)))
-    ((<= byte 90)
-     (if (member byte '(65 69 73 79 85)) 48 52))
-    ((<= byte 96)
-     (case byte (91 24) (93 28) (otherwise 12)))
-    ((<= byte 122)
-     (if (member byte '(97 101 105 111 117)) 56 60))
-    ((<= byte 126)
-     (case byte (123 24) (125 28) (otherwise 12)))
-    ((< byte 192) (logand byte 1))
-    (t (+ 2 (logand byte 1)))))
+(defparameter +brotli-utf8-lut0+ #(
+     0  0  0  0  0  0  0  0  0  4  4  0  0  4  0  0
+     0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+     8 12 16 12 12 20 12 16 24 28 12 12 32 12 36 12
+    44 44 44 44 44 44 44 44 44 44 32 32 24 40 28 12
+    12 48 52 52 52 48 52 52 52 48 52 52 52 52 52 48
+    52 52 52 52 52 48 52 52 52 52 52 24 12 28 12 12
+    12 56 60 60 60 56 60 60 60 56 60 60 60 60 60 56
+    60 60 60 60 60 56 60 60 60 60 60 24 12 28 12  0
+     0  1  0  1  0  1  0  1  0  1  0  1  0  1  0  1
+     0  1  0  1  0  1  0  1  0  1  0  1  0  1  0  1
+     0  1  0  1  0  1  0  1  0  1  0  1  0  1  0  1
+     0  1  0  1  0  1  0  1  0  1  0  1  0  1  0  1
+     2  3  2  3  2  3  2  3  2  3  2  3  2  3  2  3
+     2  3  2  3  2  3  2  3  2  3  2  3  2  3  2  3
+     2  3  2  3  2  3  2  3  2  3  2  3  2  3  2  3
+     2  3  2  3  2  3  2  3  2  3  2  3  2  3  2  3
+  ))
 
-(defun %brotli-utf8-lut1 (byte)
-  (cond
-    ((<= byte 32) 0)
-    ((<= byte 47) 1)
-    ((<= byte 57) 2)
-    ((<= byte 64) 1)
-    ((<= byte 90) 2)
-    ((<= byte 96) 1)
-    ((<= byte 122) 3)
-    ((<= byte 126) 1)
-    ((< byte 208) 0)
-    (t 2)))
+(defparameter +brotli-utf8-lut1+ #(
+     0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+     0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+     0  1  1  1  1  1  1  1  1  1  1  1  1  1  1  1
+     2  2  2  2  2  2  2  2  2  2  1  1  1  1  1  1
+     1  2  2  2  2  2  2  2  2  2  2  2  2  2  2  2
+     2  2  2  2  2  2  2  2  2  2  2  1  1  1  1  1
+     1  3  3  3  3  3  3  3  3  3  3  3  3  3  3  3
+     3  3  3  3  3  3  3  3  3  3  3  1  1  1  1  0
+     0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+     0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+     0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+     0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+     0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+     0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+     2  2  2  2  2  2  2  2  2  2  2  2  2  2  2  2
+     2  2  2  2  2  2  2  2  2  2  2  2  2  2  2  2
+  ))
 
 (defun %brotli-signed-lut (byte)
   (cond ((zerop byte) 0)
@@ -421,12 +467,10 @@
   (case mode
     (0 (logand previous #x3f))
     (1 (ash previous -2))
-    (2 (logior (%brotli-utf8-lut0 previous)
-               (%brotli-utf8-lut1 previous-previous)))
+    (2 (logior (aref +brotli-utf8-lut0+ previous)
+               (aref +brotli-utf8-lut1+ previous-previous)))
     (3 (logior (ash (%brotli-signed-lut previous) 3)
-               (%brotli-signed-lut previous-previous)))
-    (otherwise (%brotli-error "A Brotli literal context mode is invalid."
-                              :invalid-context-mode))))
+               (%brotli-signed-lut previous-previous)))))
 
 (defun %brotli-previous-bytes (output)
   (let ((length (fill-pointer output)))
@@ -434,9 +478,10 @@
             (if (< length 2) 0 (aref output (- length 2))))))
 
 (defun %brotli-emit-byte (output value limit)
-  (when (>= (fill-pointer output) limit)
+  (when (and limit (>= (fill-pointer output) limit))
     (error 'brotli-size-limit-exceeded
            :message "The Brotli output exceeded its size limit."
+           :position *brotli-current-position*
            :reason :output-limit :limit limit
            :observed (1+ (fill-pointer output))))
   (vector-push-extend value output))
@@ -485,9 +530,7 @@
        (values (+ 16 (ash offset -3)) (+ 8 (mod offset 8)) nil)))
     ((< command 704)
      (let ((offset (- command 640)))
-       (values (+ 16 (ash offset -3)) (+ 16 (mod offset 8)) nil)))
-    (t (%brotli-error "A Brotli insert-and-copy code is invalid."
-                      :invalid-command-code))))
+       (values (+ 16 (ash offset -3)) (+ 16 (mod offset 8)) nil)))))
 
 (defun %brotli-read-insert-copy-lengths (reader command)
   (multiple-value-bind (insert-code copy-code implicit-distance-p)
@@ -531,9 +574,6 @@
                             (t 1)))
          (distance (+ (aref cache cache-index)
                       (aref +brotli-short-distance-deltas+ code))))
-    (when (<= distance 0)
-      (%brotli-error "A Brotli short distance resolves to zero or less."
-                     :invalid-short-distance))
     distance))
 
 (defun %brotli-update-distance-cache (cache distance)
@@ -543,7 +583,10 @@
 
 (defun %brotli-copy-reference (output distance length limit)
   (let ((start (- (fill-pointer output) distance)))
-    (when (or (<= distance 0) (minusp start))
+    (when (<= distance 0)
+      (%brotli-error "A Brotli backward reference has a non-positive distance."
+                     :invalid-distance distance))
+    (when (minusp start)
       (%brotli-error "A Brotli backward reference points before output."
                      :distance-before-output))
     (loop repeat length
@@ -636,9 +679,6 @@
                                           previous previous-previous)))))
                             (literal (%brotli-decode-symbol
                                       reader (aref literal-trees tree-index))))
-                       (when (>= literal 256)
-                         (%brotli-error "A Brotli literal symbol is invalid."
-                                        :invalid-literal-symbol))
                        (%brotli-emit-byte output literal limit)
                        (%brotli-decrement-block-count literal-blocks)))
                    (decf remaining insert-length)
@@ -743,7 +783,8 @@
                 (values :compressed nil length)))))))))
 
 (defun %brotli-decode-octets (octets max-output-bytes)
-  (let* ((reader (%make-brotli-bit-reader octets))
+  (let* ((*brotli-current-position* 0)
+         (reader (%make-brotli-bit-reader octets))
          (window-bits (%brotli-read-window-bits reader))
          (window-size (- (ash 1 window-bits) 16))
          (output (make-array 0 :element-type '(unsigned-byte 8)
@@ -769,61 +810,86 @@
             (brotli-bit-reader-position reader))))
 
 (defun brotli-decode
-    (octets &key (max-output-bytes +brotli-default-max-output-bytes+)
-                   max-output)
+    (octets &key (max-output-bytes +brotli-default-max-output-bytes+
+                                   max-output-bytes-p)
+                   (max-output nil max-output-p)
+                   (unbounded nil))
   "Decode one RFC 7932 Brotli stream into a fresh octet vector."
-  (setf max-output-bytes (or max-output max-output-bytes))
-  (unless (%brotli-octet-vector-p octets)
-    (%brotli-error "BROTLI-DECODE requires a vector of octets."
-                   :invalid-input-type (type-of octets)))
-  (unless (and (integerp max-output-bytes) (>= max-output-bytes 0))
-    (%brotli-error "MAX-OUTPUT-BYTES must be a non-negative integer."
-                   :invalid-output-limit))
-  (%brotli-decode-octets octets max-output-bytes))
-
-(defun brotli-decompress (octets &rest options)
-  (apply #'brotli-decode octets options))
+  (let ((output-limit (%brotli-normalize-output-limit
+                       max-output-bytes max-output-bytes-p
+                       max-output max-output-p unbounded)))
+    (unless (%brotli-octet-vector-p octets)
+      (%brotli-error "BROTLI-DECODE requires a vector of octets."
+                     :invalid-input-type (type-of octets)))
+    (%brotli-decode-octets octets output-limit)))
 
 (defstruct (brotli-stream (:constructor %make-brotli-stream))
-  (chunks nil)
+  (input (make-array 0 :element-type '(unsigned-byte 8)
+                     :adjustable t :fill-pointer 0))
+  (max-input-bytes +brotli-default-max-input-bytes+)
   (max-output-bytes +brotli-default-max-output-bytes+)
   (finished-p nil))
 
 (defun make-brotli-stream
-    (&key (max-output-bytes +brotli-default-max-output-bytes+) max-output)
-  (setf max-output-bytes (or max-output max-output-bytes))
-  (unless (and (integerp max-output-bytes) (>= max-output-bytes 0))
-    (%brotli-error "MAX-OUTPUT-BYTES must be a non-negative integer."
-                   :invalid-output-limit))
-  (%make-brotli-stream :max-output-bytes max-output-bytes))
+    (&key (max-output-bytes +brotli-default-max-output-bytes+
+                            max-output-bytes-p)
+          (max-output nil max-output-p)
+          (unbounded nil)
+          (max-input-bytes +brotli-default-max-input-bytes+))
+  (let ((output-limit (%brotli-normalize-output-limit
+                       max-output-bytes max-output-bytes-p
+                       max-output max-output-p unbounded)))
+    (unless (and (integerp max-input-bytes) (>= max-input-bytes 0))
+      (%brotli-error "MAX-INPUT-BYTES must be a non-negative integer."
+                     :invalid-input-limit))
+    (%make-brotli-stream :max-input-bytes max-input-bytes
+                         :max-output-bytes output-limit)))
 
 (defun brotli-stream-push (stream octets)
   (when (brotli-stream-finished-p stream)
     (%brotli-error "The Brotli stream has already been finished."
                    :stream-finished))
-  (unless (%brotli-octet-vector-p octets)
+  (unless (vectorp octets)
     (%brotli-error "BROTLI-STREAM-PUSH requires a vector of octets."
                    :invalid-input-type (type-of octets)))
-  (push octets (brotli-stream-chunks stream))
-  nil)
+  (let* ((input (brotli-stream-input stream))
+         (current (fill-pointer input))
+         (chunk-length (length octets))
+         (observed (+ current chunk-length))
+         (limit (brotli-stream-max-input-bytes stream)))
+    (when (> observed limit)
+      (error 'brotli-size-limit-exceeded
+             :message "The Brotli input exceeded its size limit."
+             :position limit
+             :reason :input-limit
+             :limit limit
+             :observed observed))
+    (unless (%brotli-octet-vector-p octets)
+      (%brotli-error "BROTLI-STREAM-PUSH requires a vector of octets."
+                     :invalid-input-type (type-of octets)))
+    (when (plusp chunk-length)
+      (let ((capacity (array-total-size input)))
+        (when (< capacity observed)
+          (let ((new-capacity
+                  (min limit
+                       (max observed
+                            (if (zerop capacity) 1 (* capacity 2))))))
+            (setf input (adjust-array input new-capacity
+                                      :element-type '(unsigned-byte 8)
+                                      :fill-pointer current)
+                  (brotli-stream-input stream) input)))
+        (setf (fill-pointer input) observed)
+        (replace input octets :start1 current)))
+  nil))
 
 (defun brotli-stream-finish (stream)
   (when (brotli-stream-finished-p stream)
     (%brotli-error "The Brotli stream has already been finished."
                    :stream-finished))
   (setf (brotli-stream-finished-p stream) t)
-  (let ((chunks (nreverse (brotli-stream-chunks stream))))
-    (setf (brotli-stream-chunks stream) chunks)
-    (let* ((length (loop for chunk in chunks sum (length chunk)))
-           (input (make-array length :element-type '(unsigned-byte 8)))
-           (position 0))
-      (dolist (chunk chunks)
-        (replace input chunk :start1 position)
-        (incf position (length chunk)))
-      (setf (brotli-stream-chunks stream) nil
-            chunks nil)
-      (multiple-value-bind (output consumed)
-          (brotli-decode input :max-output-bytes
-                         (brotli-stream-max-output-bytes stream))
-        (declare (ignore consumed))
-        output))))
+  (let ((input (brotli-stream-input stream))
+        (output-limit (brotli-stream-max-output-bytes stream)))
+    (setf (brotli-stream-input stream) nil)
+    (if output-limit
+        (brotli-decode input :max-output-bytes output-limit)
+        (brotli-decode input :unbounded t))))
