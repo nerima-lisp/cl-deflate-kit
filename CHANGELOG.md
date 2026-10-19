@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Improve raw DEFLATE and INFLATE throughput against the `aitools` codec at
+  revision `1b20c3ab` on 2 MiB high-entropy and text inputs.
+- Add explicit `:unbounded t` mode to raw INFLATE, streaming INFLATE, and gzip decode while retaining the 16 MiB default limit.
+- Add gzip header parsing at an input offset and bounded first-member prefix decoding.
+- Add malformed-input, output-limit, concatenated-member, and property-based round-trip tests.
+
 ## 0.2.0
 
 - Expose parsed gzip member headers as the second value from `gzip-decode`.
@@ -13,7 +21,8 @@
 ## 0.1.1
 
 - Reject reserved RFC 1951 dynamic Huffman counts.
-- Reject unsupported one-shot and asynchronous flush options instead of ignoring them.
+- Reject `:raw nil` and `:sync-flush t` in one-shot `deflate`; `deflater-flush`
+  supports only the default `:sync t`.
 
 ## 0.1.0
 

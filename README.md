@@ -2,8 +2,20 @@
 
 Pure Common Lisp RFC 1951 DEFLATE, RFC 1950 zlib, and RFC 1952 gzip codecs.
 The public package is `deflate-kit`. It has no Lisp dependencies and supports
-bounded decompression, checksums, one-shot APIs, and chunk-accumulating stream
-objects.
+bounded decompression, checksums, one-shot APIs, and raw DEFLATE/INFLATE stream
+APIs.
+
+With the system available to ASDF, a raw DEFLATE round trip looks like this:
+
+```lisp
+(require :asdf)
+(asdf:load-system "cl-deflate-kit")
+
+(let* ((input (make-array 3 :element-type '(unsigned-byte 8)
+                           :initial-contents '(1 2 3)))
+       (compressed (deflate-kit:deflate input)))
+  (assert (equalp input (deflate-kit:inflate compressed))))
+```
 
 `deflate` accepts octet vectors, strings, or octet lists and returns a raw
 DEFLATE octet vector. Compression levels 1-3 use fixed Huffman blocks; levels
@@ -11,10 +23,30 @@ DEFLATE octet vector. Compression levels 1-3 use fixed Huffman blocks; levels
 least 32 bytes. Level 0 uses stored blocks. `gzip-compress` and `zlib-compress`
 wrap the same raw codec.
 
-`inflate` accepts `:max-output-bytes`, `:truncate-at`, and `:size-hint`.
-`gzip-decode` and `zlib-decode` accept `:max-output-bytes` and the compatibility
-spelling `:max-output`. The gzip decoder also accepts `:allow-trailing-padding`,
-which defaults to `NIL`.
+Strings map each character directly to its character code as one octet, so
+character codes above 255 are rejected.
+
+`inflate` accepts `:max-output-bytes`, `:max-output`, `:truncate-at`, and
+`:size-hint`. Its default output limit is 16 MiB. Pass `:unbounded t` to disable
+the limit explicitly; `:unbounded` cannot be combined with an output limit.
+`:max-output` is a compatibility alias for `:max-output-bytes`; pass only one.
+`:truncate-at` stops decoding after that many output bytes and returns `NIL` as
+the consumed-input value. `:size-hint` reserves output capacity without
+limiting the decoded size. Otherwise, the second value from `inflate` is the
+number of input bytes consumed from `:start`.
+The output-limit keywords differ by API:
+
+| API | Output-limit keywords |
+| --- | --- |
+| `inflate` | `:max-output-bytes`, `:max-output`, `:unbounded` |
+| `make-inflate-stream` | `:max-output-bytes`, `:max-output`, `:unbounded` |
+| `gzip-decode` | `:max-output-bytes`, `:max-output`, `:unbounded` |
+| `gzip-decode-prefix` | Required `:max-output` |
+| `zlib-decode` | `:max-output-bytes`, `:max-output` |
+
+All APIs except `gzip-decode-prefix` default to a 16 MiB output limit. The gzip
+limit applies to the aggregate output of all decoded members. `gzip-decode`
+also accepts `:allow-trailing-padding`, which defaults to `NIL`.
 
 `gzip-decode` returns the concatenated decoded octets from all members as its
 primary value and a list of `gzip-member-header` structures as its second
@@ -42,37 +74,86 @@ FEXTRA contains only the field payload, without its two-byte length. FNAME and
 FCOMMENT omit their terminating NUL. Header text fields remain raw bytes and
 are not decoded as strings. FHCRC returns `NIL` when the header has no FHCRC.
 
+`gzip-member-header-at` accepts `:start` and `:end` and returns the parsed
+header and the absolute start of its DEFLATE payload. `gzip-decode-prefix`
+requires `:max-output` and decodes only the first member. It returns the
+decoded prefix, its header, and the absolute end position; the position is
+`NIL` when decoding reaches the output bound, including when the member's
+decoded length exactly equals that bound. The member trailer is validated only
+when decoding completes before the bound.
+
 With `:allow-trailing-padding t`, `gzip-decode` accepts a suffix only when at
 least one member has decoded and every remaining byte is zero. Padding adds no
 member or header. Empty or all-zero input, zero-valued bytes between members,
 and nonzero or mixed trailing data still signal `invalid-container-error`.
 
-The default decompression limit is 16 MiB. Exceeding it signals
+The default decompression limit is 16 MiB, aggregated across concatenated gzip
+members. Exceeding it signals
 `inflate-size-limit-exceeded`, a subtype of `deflate-output-limit`.
 Malformed raw DEFLATE payloads signal `inflate-invalid-data`; malformed gzip or
 zlib framing signals `invalid-container-error`. Checksum failures signal
 `checksum-error`.
 
-The public API covers raw DEFLATE, zlib, gzip, CRC-32, Adler-32, and chunk-
-accumulating stream codecs. ZIP and TAR container APIs are intentionally left
-to callers such as aitools; gzip can therefore be used as the codec for
-`tar.gz` without making archive traversal decisions in this library.
+The public API covers raw DEFLATE, zlib, gzip, CRC-32, Adler-32, and stream
+codecs. `deflater-write` returns newly available complete compressed bytes;
+`deflater-finish` returns the remaining bytes. `inflate-stream-push` retains
+input chunks, and `inflate-stream-finish` decodes them. ZIP and TAR container
+APIs remain with callers such as aitools; gzip can therefore be used as the
+codec for `tar.gz` without making archive traversal decisions in this library.
 
-Performance was measured on macOS arm64 with SBCL 2.6.0 using one-shot level 6
-APIs and deterministic 1 MiB inputs. A repeated-byte input compressed to 1,064
-bytes (0.1015%) at 23.60 MiB/s and inflated at 84.60 MiB/s. The deterministic
-pseudo-random input compressed to 1,049,370 bytes (100.0763%) at 2.79 MiB/s
-and inflated at 1.47 MiB/s. These are baseline measurements, not guarantees.
+Performance measurements used SBCL 2.6.8 on macOS arm64 and 2 MiB
+high-entropy and text inputs. The reference was the `aitools` codec at revision
+`1b20c3ab`. Calls alternated between this kit and the reference in the same
+process. A full GC ran before each timed call. The table reports medians of
+seven paired measurements, the kit's paired wins, and the reference-to-kit
+speed ratio. Inflate used the same reference-compressed input for both decoders.
 
-For a 2 MiB input, five warmed-up measurements with full GC before each sample
-gave the following medians on the same macOS arm64 host. The patterned input
-compressed to 6,185 bytes: deflate 0.133755 s (14.953 MiB/s), inflate 0.030592
-s (65.377 MiB/s). The deterministic LCG pseudo-random input compressed to
-2,098,694 bytes: deflate 4.504677 s (0.444 MiB/s), inflate 2.497852 s (0.801
-MiB/s). The benchmark uses `state = (state * 1664525 + 1013904223) mod 2^32`
-and emits the high byte, with one warm-up run and full output comparisons.
+| Payload | Operation | Kit median | Reference median | Speed ratio | Kit wins |
+| --- | --- | ---: | ---: | ---: | ---: |
+| High entropy | DEFLATE | 169.832 ms | 341.083 ms | 2.008x | 7/7 |
+| High entropy | INFLATE | 159.701 ms | 177.533 ms | 1.112x | 7/7 |
+| Text | DEFLATE | 17.189 ms | 40.095 ms | 2.333x | 7/7 |
+| Text | INFLATE | 14.494 ms | 21.755 ms | 1.501x | 7/7 |
+| High entropy | CRC-32 | 10.572 ms | 10.600 ms | 1.003x | 4/7 |
+| Text | CRC-32 | 10.947 ms | 10.859 ms | 0.992x | 4/7 |
 
-`nix flake check` on the Ubuntu x86_64 runner is the release gate. `ci/lint.sh`
-checks Nix formatting and compilation, while `ci/coverage.lisp` runs the ASDF
-tests with SBCL's built-in coverage instrumentation and rejects an empty
-coverage result.
+Five A/A pairs per arm measured relative timing differences between consecutive
+calls to the same implementation. The values below are median / maximum percent
+difference; they record the observed timing variation for this run.
+
+| Payload | Operation | Kit A/A | Reference A/A |
+| --- | --- | ---: | ---: |
+| High entropy | DEFLATE | 4.37 / 8.50% | 3.17 / 7.82% |
+| High entropy | INFLATE | 3.34 / 6.22% | 3.77 / 16.78% |
+| High entropy | CRC-32 | 0.95 / 3.76% | 0.11 / 3.68% |
+| Text | DEFLATE | 10.19 / 179.11% | 4.01 / 8.19% |
+| Text | INFLATE | 4.05 / 11.50% | 8.48 / 41.87% |
+| Text | CRC-32 | 6.14 / 16.14% | 1.39 / 13.07% |
+
+CRC-32 timings were close to parity and within the observed A/A spread, so they
+do not establish a performance improvement. These measurements describe one
+machine and are not performance guarantees.
+
+The benchmark harness is `bench/compare-aitools.lisp`. Its high-entropy input
+uses a 32-bit linear congruential generator seeded with `2463534242`; each byte
+is the high byte of the updated state. Its text input repeats the ASCII text in
+`%text-octets`. The harness checks both codecs' round trips and CRC results
+before timing, runs seven alternating pairs and five A/A pairs per arm, and
+compiles the `aitools` source files into the system temporary directory.
+Inflate uses the same `aitools`-compressed bytes for both decoders.
+
+Set `AITOOOLS_ROOT` to an `aitools` checkout at revision `1b20c3ab`, then run
+this command from the repository root:
+
+```sh
+CL_SOURCE_REGISTRY="$PWD//:/" nix develop -c sbcl --script bench/compare-aitools.lisp
+```
+
+The release workflow runs on Ubuntu 24.04. It verifies that the tag matches the
+ASDF system version, then runs these checks before creating the GitHub Release:
+
+```sh
+nix develop -c bash ci/lint.sh
+nix develop -c sbcl --script ci/coverage.lisp
+nix flake check
+```
