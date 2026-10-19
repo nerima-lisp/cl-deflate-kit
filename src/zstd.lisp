@@ -56,8 +56,7 @@
   (error 'zstd-size-limit-exceeded :message "Zstandard size limit exceeded."
          :reason reason :limit limit :observed observed :position position))
 
-(defun %zstd-validate-limit (value name)
-  (declare (ignore name))
+(defun %zstd-validate-limit (value)
   (unless (and (integerp value) (not (minusp value)))
     (error 'type-error :datum value :expected-type '(integer 0 *)))
   value)
@@ -70,7 +69,7 @@
     (error 'deflate-error :message "specify only one Zstandard output limit."))
   (let ((limit (if max-output-p max-output max-output-bytes)))
     (when limit
-      (%zstd-validate-limit limit :max-output-bytes))
+      (%zstd-validate-limit limit))
     (if unbounded nil (or limit +zstd-default-max-output-bytes+))))
 
 (defun %zstd-check-output (output count &optional position)
@@ -108,16 +107,13 @@
     start))
 
 (defun %zstd-backref-output (output offset count &optional position)
-  (let* ((data (zstd-output-data output))
-         (start (%zstd-reserve-output output count)))
+  (let* ((start (%zstd-reserve-output output count))
+         (data (zstd-output-data output)))
     (when (or (zerop offset) (> offset start))
       (%zstd-invalid :offset-out-of-range offset position))
     (loop for index from start below (+ start count)
           do (setf (aref data index) (aref data (- index offset))))
     start))
-
-(defun %zstd-output-length (output)
-  (fill-pointer (zstd-output-data output)))
 
 (defun %zstd-require-bytes (octets position count end)
   (declare (ignore octets))
@@ -318,15 +314,12 @@
                        :entries (vector (make-zstd-fse-entry
                                          :symbol symbol :bits 0 :baseline 0))))
 
-(defun %zstd-fse-table-from-distribution (distribution log)
-  (%zstd-build-fse-table distribution log))
-
 (defparameter +zstd-default-ll-table+
-  (%zstd-fse-table-from-distribution +zstd-default-ll-distribution+ 6))
+  (%zstd-build-fse-table +zstd-default-ll-distribution+ 6))
 (defparameter +zstd-default-ml-table+
-  (%zstd-fse-table-from-distribution +zstd-default-ml-distribution+ 6))
+  (%zstd-build-fse-table +zstd-default-ml-distribution+ 6))
 (defparameter +zstd-default-of-table+
-  (%zstd-fse-table-from-distribution +zstd-default-of-distribution+ 5))
+  (%zstd-build-fse-table +zstd-default-of-distribution+ 5))
 
 (defconstant +xxh64-prime1+ #x9e3779b185ebca87)
 (defconstant +xxh64-prime2+ #xc2b2ae3d27d4eb4f)
@@ -470,10 +463,10 @@
                  (zstd-output-limit output)
                  (> content-size
                     (- (zstd-output-limit output)
-                       (%zstd-output-length output))))
+                       (fill-pointer (zstd-output-data output)))))
         (%zstd-limit-exceeded :output-size-limit
                               (zstd-output-limit output)
-                              (+ (%zstd-output-length output) content-size)
+                              (+ (fill-pointer (zstd-output-data output)) content-size)
                               next))
       (values next
               (make-zstd-frame-state
@@ -670,7 +663,7 @@
 (defun %zstd-check-block-growth
     (output block-start block-max count &optional position)
   (%zstd-check-output output count position)
-  (when (> (+ (- (%zstd-output-length output) block-start) count)
+  (when (> (+ (- (fill-pointer (zstd-output-data output)) block-start) count)
            block-max)
     (%zstd-invalid :block-output-size-limit
                    (list :maximum block-max :additional count) position)))
@@ -859,7 +852,7 @@
                        (+ literal-position literal-length))
   (let* ((offset (%zstd-repeat-offset frame-state offset-value literal-length
                                       input-position))
-         (available (- (%zstd-output-length output) frame-start)))
+         (available (- (fill-pointer (zstd-output-data output)) frame-start)))
     (when (or (>= offset (zstd-frame-state-window-size frame-state))
               (> offset available))
       (%zstd-invalid :offset-out-of-range
@@ -984,7 +977,7 @@
             end))))))
 (defun %zstd-decode-compressed-block
     (octets start end output frame-start frame-state)
-  (let ((block-start (%zstd-output-length output)))
+  (let ((block-start (fill-pointer (zstd-output-data output))))
     (multiple-value-bind (literals next)
         (%zstd-decode-literals octets start end output block-start frame-state)
       (%zstd-decode-sequences octets next end output frame-start block-start
@@ -1005,13 +998,13 @@
               (case type
                 (0
                  (%zstd-require-bytes octets content-start size end)
-                 (%zstd-check-block-growth output (%zstd-output-length output)
+                 (%zstd-check-block-growth output (fill-pointer (zstd-output-data output))
                                            block-max size position)
                  (%zstd-append-output output octets content-start content-end)
                  content-end)
                 (1
                  (%zstd-require-bytes octets content-start 1 end)
-                 (%zstd-check-block-growth output (%zstd-output-length output)
+                 (%zstd-check-block-growth output (fill-pointer (zstd-output-data output))
                                            block-max size position)
                  (%zstd-repeat-output output (aref octets content-start) size)
                  (1+ content-start))
@@ -1022,7 +1015,7 @@
                 (otherwise (%zstd-invalid :reserved-block-type type position)))))
         (values next last-p)))))
 (defun %zstd-decode-frame (octets position end output max-window)
-  (let ((frame-start (%zstd-output-length output)))
+  (let ((frame-start (fill-pointer (zstd-output-data output))))
     (multiple-value-bind (position frame-state content-size checksum-p)
         (%zstd-parse-frame-header octets position end output max-window)
       (let ((finished-p nil))
@@ -1034,7 +1027,7 @@
                      (%zstd-invalid :no-frame-progress position))
                    (setf position next
                          finished-p last-p)))
-        (let ((actual-size (- (%zstd-output-length output) frame-start)))
+        (let ((actual-size (- (fill-pointer (zstd-output-data output)) frame-start)))
           (when (and content-size (/= content-size actual-size))
             (%zstd-invalid :content-size-mismatch
                            (list :expected content-size :actual actual-size)
@@ -1044,7 +1037,7 @@
                 (%zstd-read-uint-le octets position 4 end)
               (let ((actual
                       (logand (%zstd-xxh64 (zstd-output-data output)
-                                           frame-start (%zstd-output-length output))
+                                           frame-start (fill-pointer (zstd-output-data output)))
                               #xffffffff)))
                 (unless (= expected actual)
                   (error 'checksum-error
@@ -1066,9 +1059,9 @@
           (%zstd-resolve-output-limit max-output max-output-p
                                       max-output-bytes max-output-bytes-p
                                       unbounded)))
-    (%zstd-validate-limit max-window-size-bytes :max-window-size-bytes)
+    (%zstd-validate-limit max-window-size-bytes)
     (when max-input-bytes
-      (%zstd-validate-limit max-input-bytes :max-input-bytes))
+      (%zstd-validate-limit max-input-bytes))
     (unless (vectorp octets)
       (%zstd-invalid :invalid-input-type (type-of octets) 0))
     (let ((end (length octets)))
@@ -1099,7 +1092,7 @@
                      (unless (> next position)
                        (%zstd-invalid :no-frame-progress position))
                      (setf position next))))
-        (subseq (zstd-output-data output) 0 (%zstd-output-length output))))))
+        (subseq (zstd-output-data output) 0 (fill-pointer (zstd-output-data output)))))))
 (defun make-zstd-stream
     (&key (max-output-bytes nil max-output-bytes-p)
           (max-output nil max-output-p)
@@ -1111,8 +1104,8 @@
                                       max-output-bytes max-output-bytes-p
                                       unbounded)))
     (when max-input-bytes
-      (%zstd-validate-limit max-input-bytes :max-input-bytes))
-    (%zstd-validate-limit max-window-size-bytes :max-window-size-bytes)
+      (%zstd-validate-limit max-input-bytes))
+    (%zstd-validate-limit max-window-size-bytes)
     (%make-zstd-stream :chunks nil
                        :max-output-bytes output-limit
                        :max-input-bytes max-input-bytes

@@ -525,6 +525,19 @@
           (progn
             (rejects 'zstd-invalid-data
                      (lambda () (zstd-decode bad-block)))
+            (check
+             (let* ((output (deflate-kit::%make-zstd-output 8))
+                    (data (make-array 4 :element-type '(unsigned-byte 8)
+                                      :adjustable t :fill-pointer 3
+                                      :initial-contents #(17 34 51 0))))
+               (setf (deflate-kit::zstd-output-data output) data)
+               (deflate-kit::%zstd-append-output output #(68) 0 1)
+               (check (and (= 4 (fill-pointer data))
+                           (= 4 (array-total-size data))))
+               (deflate-kit::%zstd-backref-output output 1 3)
+               (equalp #(17 34 51 68 68 68 68)
+                       (subseq (deflate-kit::zstd-output-data output) 0
+                               (fill-pointer (deflate-kit::zstd-output-data output))))))
             ;; Offset 3 exceeds the two bytes already in output history.
             (check
              (let ((output (deflate-kit::%make-zstd-output 8))
