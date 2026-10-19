@@ -64,31 +64,39 @@
   (buffer 0)
   (bits 0))
 
+(declaim (inline %brotli-read-bits %brotli-emit-byte))
+
 (defun %brotli-read-bits (reader count)
   (unless (and (integerp count) (<= 0 count 32))
     (%brotli-error "A Brotli bit width is invalid." :invalid-bit-width count))
-  (loop while (< (brotli-bit-reader-bits reader) count)
-        do (let ((position (brotli-bit-reader-position reader))
-                 (octets (brotli-bit-reader-octets reader)))
-             (when (>= position (length octets))
-               (setf *brotli-current-position* position)
-               (%brotli-error "The Brotli stream ended prematurely."
-                              :truncated-input position))
-             (setf (brotli-bit-reader-buffer reader)
-                   (logior (brotli-bit-reader-buffer reader)
-                           (ash (aref octets position)
-                                (brotli-bit-reader-bits reader)))
-                   (brotli-bit-reader-position reader) (1+ position)
-                   (brotli-bit-reader-bits reader)
-                   (+ (brotli-bit-reader-bits reader) 8)
-                   *brotli-current-position* (1+ position))))
-  (let ((value (logand (brotli-bit-reader-buffer reader)
-                       (if (zerop count) 0 (1- (ash 1 count))))))
-    (setf (brotli-bit-reader-buffer reader)
-          (ash (brotli-bit-reader-buffer reader) (- count))
-          (brotli-bit-reader-bits reader)
-          (- (brotli-bit-reader-bits reader) count))
-    value))
+  (locally
+      (declare (optimize (speed 3))
+               (type brotli-bit-reader reader)
+               (type (integer 0 32) count))
+    (let ((position (brotli-bit-reader-position reader))
+          (octets (brotli-bit-reader-octets reader))
+          (buffer (brotli-bit-reader-buffer reader))
+          (bits (brotli-bit-reader-bits reader)))
+      (declare (type fixnum position bits)
+               (type (unsigned-byte 64) buffer)
+               (type vector octets))
+      (loop while (< bits count)
+            do (when (>= position (length octets))
+                 (setf *brotli-current-position* position)
+                 (%brotli-error "The Brotli stream ended prematurely."
+                                :truncated-input position))
+               (setf buffer (logior buffer (ash (aref octets position) bits))
+                     position (1+ position)
+                     bits (+ bits 8)
+                     (brotli-bit-reader-buffer reader) buffer
+                     (brotli-bit-reader-position reader) position
+                     (brotli-bit-reader-bits reader) bits
+                     *brotli-current-position* position))
+      (let ((value (logand buffer
+                           (if (zerop count) 0 (1- (ash 1 count))))))
+        (setf (brotli-bit-reader-buffer reader) (ash buffer (- count))
+              (brotli-bit-reader-bits reader) (- bits count))
+        value))))
 
 (defun %brotli-align-byte (reader)
   (let ((bits (brotli-bit-reader-bits reader)))
@@ -177,20 +185,29 @@
   (unless (null (brotli-huffman-table-single-symbol table))
     (return-from %brotli-decode-symbol
       (brotli-huffman-table-single-symbol table)))
-  (let ((code 0)
-        (counts (brotli-huffman-table-counts table))
-        (first-codes (brotli-huffman-table-first-codes table))
-        (first-symbols (brotli-huffman-table-first-symbols table))
-        (symbols (brotli-huffman-table-symbols table)))
-    (loop for length from 1 to (brotli-huffman-table-max-length table)
-          do (setf code (+ (ash code 1) (%brotli-read-bits reader 1)))
-             (let* ((offset (- code (aref first-codes length)))
-                    (count (aref counts length)))
-               (when (and (<= 0 offset) (< offset count))
-                 (return-from %brotli-decode-symbol
-                   (aref symbols (+ (aref first-symbols length) offset))))))
-    (%brotli-error "The Brotli stream contains an invalid Huffman code."
-                   :invalid-huffman-code)))
+  (locally
+      (declare (optimize (speed 3))
+               (type brotli-bit-reader reader)
+               (type brotli-huffman-table table))
+    (let ((code 0)
+          (counts (brotli-huffman-table-counts table))
+          (first-codes (brotli-huffman-table-first-codes table))
+          (first-symbols (brotli-huffman-table-first-symbols table))
+          (symbols (brotli-huffman-table-symbols table))
+          (max-length (brotli-huffman-table-max-length table)))
+      (declare (type fixnum code max-length)
+               (type (vector (unsigned-byte 16))
+                     counts first-codes first-symbols symbols))
+      (loop for length of-type fixnum from 1 to max-length
+            do (setf code (+ (ash code 1) (%brotli-read-bits reader 1)))
+               (let* ((offset (- code (aref first-codes length)))
+                      (count (aref counts length)))
+                 (declare (type fixnum offset))
+                 (when (and (<= 0 offset) (< offset count))
+                   (return-from %brotli-decode-symbol
+                     (aref symbols (+ (aref first-symbols length) offset))))))
+      (%brotli-error "The Brotli stream contains an invalid Huffman code."
+                     :invalid-huffman-code))))
 
 (defun %brotli-read-code-length-prefix (reader)
   (case (%brotli-read-bits reader 2)
@@ -485,6 +502,8 @@
             (if (< length 2) 0 (aref output (- length 2))))))
 
 (defun %brotli-emit-byte (output value limit)
+  (declare (optimize (speed 3))
+           (type (vector (unsigned-byte 8)) output))
   (when (and limit (>= (fill-pointer output) limit))
     (error 'brotli-size-limit-exceeded
            :message "The Brotli output exceeded its size limit."
@@ -589,6 +608,9 @@
   (setf (aref cache 0) distance))
 
 (defun %brotli-copy-reference (output distance length limit)
+  (declare (optimize (speed 3))
+           (inline %brotli-emit-byte)
+           (type (vector (unsigned-byte 8)) output))
   (let ((start (- (fill-pointer output) distance)))
     (when (<= distance 0)
       (%brotli-error "A Brotli backward reference has a non-positive distance."
