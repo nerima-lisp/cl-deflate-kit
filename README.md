@@ -53,13 +53,14 @@ All APIs except `gzip-decode-prefix` default to a 16 MiB output limit. The gzip
 limit applies to the aggregate output of all decoded members. `gzip-decode`
 also accepts `:allow-trailing-padding`, which defaults to `NIL`.
 
-`brotli-decode` returns decoded octets. For chunked input, use
-`make-brotli-stream`, pass chunks to `brotli-stream-push`, and call
-`brotli-stream-finish` to decode them. Brotli output and stream input limits
-default to 16 MiB. `:max-input-bytes` bounds the compressed bytes retained by a
-Brotli stream. `:max-output` aliases `:max-output-bytes`; specify only one.
-Pass `:unbounded t` to disable the output limit; it cannot be combined with an
-output-limit keyword.
+`brotli-decode` accepts an octet vector and returns decoded octets. For chunked
+input, `make-brotli-stream` creates the stream state. Pass octet-vector chunks
+to `brotli-stream-push`, which retains them and returns `NIL`; call
+`brotli-stream-finish` to decode them and get the output octet vector. Brotli
+output and stream input limits default to 16 MiB. `:max-input-bytes` bounds the
+compressed bytes retained by a Brotli stream. `:max-output` aliases
+`:max-output-bytes`; specify only one. Pass `:unbounded t` to disable the output
+limit; it cannot be combined with an output-limit keyword.
 
 `gzip-decode` returns the concatenated decoded octets from all members as its
 primary value and a list of `gzip-member-header` structures as its second
@@ -118,7 +119,9 @@ zlib framing signals `invalid-container-error`. Checksum failures signal
 | `brotli-input-limit-exceeded` | `deflate-input-limit-limit`, `inflate-error-reason`, `inflate-error-observed` |
 
 All three conditions also inherit `deflate-error-message` and
-`deflate-error-position`.
+`deflate-error-position`. For `brotli-input-limit-exceeded`, the position is
+the zero-based byte offset of the first input byte rejected by
+`:max-input-bytes`.
 
 The public API covers raw DEFLATE, zlib, gzip, Brotli, CRC-32, Adler-32, and
 stream codecs. `deflater-write` returns newly available complete compressed bytes;
