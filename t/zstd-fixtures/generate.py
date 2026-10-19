@@ -122,6 +122,23 @@ def main():
         generated["plain.txt"] = plain
         generated["plain.zst"] = work / "plain.zst"
 
+        multilingual = work / "multilingual.txt"
+        multilingual.write_bytes(
+            "Привет, мир!\n你好，世界！\nこんにちは世界\n".encode("utf-8")
+        )
+        run_zstd(
+            zstd,
+            "-q",
+            "-f",
+            "-3",
+            "--check",
+            "-o",
+            work / "multilingual.zst",
+            multilingual,
+        )
+        generated["multilingual.txt"] = multilingual
+        generated["multilingual.zst"] = work / "multilingual.zst"
+
         checksum = work / "checksum.txt"
         checksum.write_bytes(b"Zstandard frame with an XXH64 content checksum.\n")
         run_zstd(zstd, "-q", "-f", "-3", "--check", "-o", work / "checksum.zst", checksum)
