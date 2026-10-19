@@ -250,6 +250,332 @@
     (assert caught)
     (assert (= 4 (deflate-output-limit-limit caught)))
     (assert (= 5 (inflate-error-observed caught)))))
+(defun %test-zstd-predefined-tables ()
+  (let ((checks 0))
+    (labels ((check (passed)
+               (incf checks)
+               (assert passed))
+             (table-rows (table)
+               (let* ((entries (deflate-kit::zstd-fse-table-entries table))
+                      (rows (make-array (length entries))))
+                 (dotimes (state (length entries) rows)
+                   (let ((entry (aref entries state)))
+                     (setf (aref rows state)
+                           (vector (deflate-kit::zstd-fse-entry-symbol entry)
+                                   (deflate-kit::zstd-fse-entry-bits entry)
+                                   (deflate-kit::zstd-fse-entry-baseline entry)))))))
+             (check-table (table log expected)
+               (check (and (= log (deflate-kit::zstd-fse-table-log table))
+                           (equalp expected (table-rows table))))))
+      ;; RFC 8878 Appendix A.1, Table 28, states 0-63.
+      (check-table
+       deflate-kit::+zstd-default-ll-table+
+       6
+       #(#(0 4 0) #(0 4 16) #(1 5 32) #(3 5 0)
+         #(4 5 0) #(6 5 0) #(7 5 0) #(9 5 0)
+         #(10 5 0) #(12 5 0) #(14 6 0) #(16 5 0)
+         #(18 5 0) #(19 5 0) #(21 5 0) #(22 5 0)
+         #(24 5 0) #(25 5 32) #(26 5 0) #(27 6 0)
+         #(29 6 0) #(31 6 0) #(0 4 32) #(1 4 0)
+         #(2 5 0) #(4 5 32) #(5 5 0) #(7 5 32)
+         #(8 5 0) #(10 5 32) #(11 5 0) #(13 6 0)
+         #(16 5 32) #(17 5 0) #(19 5 32) #(20 5 0)
+         #(22 5 32) #(23 5 0) #(25 4 0) #(25 4 16)
+         #(26 5 32) #(28 6 0) #(30 6 0) #(0 4 48)
+         #(1 4 16) #(2 5 32) #(3 5 32) #(5 5 32)
+         #(6 5 32) #(8 5 32) #(9 5 32) #(11 5 32)
+         #(12 5 32) #(15 6 0) #(17 5 32) #(18 5 32)
+         #(20 5 32) #(21 5 32) #(23 5 32) #(24 5 32)
+         #(35 6 0) #(34 6 0) #(33 6 0) #(32 6 0)))
+      ;; RFC 8878 Appendix A.2, Table 29, states 0-63.
+      (check-table
+       deflate-kit::+zstd-default-ml-table+
+       6
+       #(#(0 6 0) #(1 4 0) #(2 5 32) #(3 5 0)
+         #(5 5 0) #(6 5 0) #(8 5 0) #(10 6 0)
+         #(13 6 0) #(16 6 0) #(19 6 0) #(22 6 0)
+         #(25 6 0) #(28 6 0) #(31 6 0) #(33 6 0)
+         #(35 6 0) #(37 6 0) #(39 6 0) #(41 6 0)
+         #(43 6 0) #(45 6 0) #(1 4 16) #(2 4 0)
+         #(3 5 32) #(4 5 0) #(6 5 32) #(7 5 0)
+         #(9 6 0) #(12 6 0) #(15 6 0) #(18 6 0)
+         #(21 6 0) #(24 6 0) #(27 6 0) #(30 6 0)
+         #(32 6 0) #(34 6 0) #(36 6 0) #(38 6 0)
+         #(40 6 0) #(42 6 0) #(44 6 0) #(1 4 32)
+         #(1 4 48) #(2 4 16) #(4 5 32) #(5 5 32)
+         #(7 5 32) #(8 5 32) #(11 6 0) #(14 6 0)
+         #(17 6 0) #(20 6 0) #(23 6 0) #(26 6 0)
+         #(29 6 0) #(52 6 0) #(51 6 0) #(50 6 0)
+         #(49 6 0) #(48 6 0) #(47 6 0) #(46 6 0)))
+      ;; RFC 8878 Appendix A.3, Table 30, states 0-31.
+      (check-table
+       deflate-kit::+zstd-default-of-table+
+       5
+       #(#(0 5 0) #(6 4 0) #(9 5 0) #(15 5 0)
+         #(21 5 0) #(3 5 0) #(7 4 0) #(12 5 0)
+         #(18 5 0) #(23 5 0) #(5 5 0) #(8 4 0)
+         #(14 5 0) #(20 5 0) #(2 5 0) #(7 4 16)
+         #(11 5 0) #(17 5 0) #(22 5 0) #(4 5 0)
+         #(8 4 16) #(13 5 0) #(19 5 0) #(1 5 0)
+         #(6 4 16) #(10 5 0) #(16 5 0) #(28 5 0)
+         #(27 5 0) #(26 5 0) #(25 5 0) #(24 5 0)))
+    (format t "RFC 8878 predefined FSE table checks passed: ~D~%" checks)
+    checks)))
+(defun %test-zstd-api-contract ()
+  (let ((checks 0))
+    (labels ((fixture (name)
+               (asdf:system-relative-pathname
+                "cl-deflate-kit"
+                (format nil "t/zstd-fixtures/~A" name)))
+             (check (passed)
+               (incf checks)
+               (assert passed))
+             (rejects (type thunk)
+               (incf checks)
+               (%assert-condition type thunk))
+             (expect-input-limit (thunk limit observed)
+               (let ((caught nil))
+                 (handler-case (funcall thunk)
+                   (zstd-input-limit-exceeded (condition)
+                     (setf caught condition)))
+                 (check
+                  (and (typep caught 'deflate-error)
+                       (typep caught 'deflate-input-limit)
+                       (not (typep caught 'deflate-output-limit))
+                       (eq :input-limit (inflate-error-reason caught))
+                       (eql limit (deflate-input-limit-limit caught))
+                       (eql observed (inflate-error-observed caught))
+                       (eql limit (deflate-error-position caught))
+                       (search (format nil "byte ~D" limit)
+                               (princ-to-string caught))
+                       (search "Zstandard input size limit exceeded"
+                               (princ-to-string caught)))))))
+      (let* ((plain (%read-octets (fixture "plain.txt")))
+             (plain-frame (%read-octets (fixture "plain.zst")))
+             (frame-length (length plain-frame))
+             (large-frame (%read-octets (fixture "window-9m.zst")))
+             (large-output (make-array (* 9 1024 1024)
+                                       :element-type '(unsigned-byte 8)
+                                       :initial-element #x57)))
+        (check (equalp plain
+                       (zstd-decode plain-frame :max-output (length plain))))
+        (let ((default-input-size (* 16 1024 1024)))
+          (check (= default-input-size
+                    deflate-kit::+zstd-default-max-input-bytes+))
+          (check (= default-input-size
+                    (deflate-kit::zstd-stream-max-input-bytes
+                     (make-zstd-stream))))
+          (expect-input-limit
+           (lambda ()
+             (zstd-decode
+              (make-array (1+ default-input-size)
+                          :element-type '(unsigned-byte 8)
+                          :initial-element 0)))
+           default-input-size (1+ default-input-size)))
+        (let ((caught nil))
+          (handler-case
+              (zstd-decode plain-frame
+                           :max-output (length plain)
+                           :max-output-bytes (length plain))
+            (zstd-invalid-data (condition)
+              (setf caught condition)))
+          (check (and (typep caught 'zstd-invalid-data)
+                      (eq :conflicting-output-limits
+                          (inflate-error-reason caught)))))
+        (check (equalp large-output
+                       (zstd-decode
+                        large-frame :unbounded t
+                        :max-window-size-bytes (* 9 1024 1024))))
+        (check (equalp plain
+                       (zstd-decode plain-frame
+                                    :max-input-bytes frame-length)))
+        (expect-input-limit
+         (lambda ()
+           (zstd-decode plain-frame :max-input-bytes (1- frame-length)))
+         (1- frame-length) frame-length)
+        (let ((stream (make-zstd-stream :max-input-bytes frame-length)))
+          (zstd-stream-push stream plain-frame)
+          (check (equalp plain (zstd-stream-finish stream))))
+        (expect-input-limit
+         (lambda ()
+           (let ((stream (make-zstd-stream
+                          :max-input-bytes (1- frame-length))))
+             (zstd-stream-push stream plain-frame)))
+         (1- frame-length) frame-length)
+        (let* ((split (floor frame-length 2))
+               (buffer (make-array (max split (- frame-length split))
+                                   :element-type '(unsigned-byte 8)
+                                   :adjustable t :fill-pointer 0))
+               (stream (make-zstd-stream)))
+          (loop for index below split
+                do (vector-push-extend (aref plain-frame index) buffer))
+          (zstd-stream-push stream buffer)
+          (setf (fill-pointer buffer) 0)
+          (loop for index from split below frame-length
+                do (vector-push-extend (aref plain-frame index) buffer))
+          (zstd-stream-push stream buffer)
+          (check (equalp plain (zstd-stream-finish stream))))
+        (let ((caught nil))
+          (handler-case
+              (zstd-decode (subseq plain-frame 0 (1- frame-length)))
+            (zstd-invalid-data (condition)
+              (setf caught condition)))
+          (check (and (typep caught 'deflate-error)
+                      (eq :truncated-input (inflate-error-reason caught))
+                      (listp (inflate-error-detail caught))
+                      (integerp (deflate-error-position caught))))))
+      (format t "FR-013 Zstandard API checks passed: ~D~%" checks)
+      checks)))
+
+(defun %test-zstd ()
+  (let ((checks 0))
+    (labels ((fixture (name)
+               (asdf:system-relative-pathname
+                "cl-deflate-kit"
+                (format nil "t/zstd-fixtures/~A" name)))
+             (check (passed)
+               (incf checks)
+               (assert passed))
+             (rejects (type thunk)
+               (incf checks)
+               (%assert-condition type thunk))
+             (decode-at-split (compressed expected split)
+               (let ((stream (make-zstd-stream)))
+                 (zstd-stream-push stream (subseq compressed 0 split))
+                 (zstd-stream-push stream (subseq compressed split))
+                 (equalp expected (zstd-stream-finish stream))))
+             (check-splits (compressed expected)
+               (let ((length (length compressed)))
+                 (dolist (split (remove-duplicates
+                                 (list 1 4 (floor length 2) (1- length))))
+                   (when (< 0 split length)
+                     (check (decode-at-split compressed expected split))))))
+             (first-block-header-offset (frame)
+               (let* ((descriptor (aref frame 4))
+                      (single-segment (logtest #x20 descriptor))
+                      (content-size-flag (ldb (byte 2 6) descriptor))
+                      (dictionary-id-size
+                        (aref #(0 1 2 4) (ldb (byte 2 0) descriptor)))
+                      (content-size-size
+                        (case content-size-flag
+                          (0 (if single-segment 1 0))
+                          (1 2)
+                          (2 4)
+                          (3 8))))
+                 (+ 5 (if single-segment 0 1)
+                    dictionary-id-size content-size-size))))
+      (let* ((plain (%read-octets (fixture "plain.txt")))
+             (plain-frame (%read-octets (fixture "plain.zst")))
+             (checksum-frame (%read-octets (fixture "checksum.zst")))
+             (rle-output (%read-octets (fixture "rle-256k.bin")))
+             (rle-frame (%read-octets (fixture "rle-256k.zst")))
+             (raw-multiblock (%read-octets
+                              (fixture "raw-multiblock.bin")))
+             (raw-multiblock-frame (%read-octets
+                                    (fixture "raw-multiblock.zst"))))
+        (dolist (pair (list (list "plain.zst" "plain.txt")
+                            (list "checksum.zst" "checksum.txt")
+                            (list "empty.zst" "empty.txt")
+                            (list "rle-256k.zst" "rle-256k.bin")
+                            (list "raw-multiblock.zst" "raw-multiblock.bin")
+                            (list "multilingual.zst" "multilingual.txt")
+                            (list "multiframe.zst" "multiframe.bin")
+                            (list "ncount.zst" "ncount.txt")))
+          (check (equalp (%read-octets (fixture (second pair)))
+                         (zstd-decode (%read-octets
+                                       (fixture (first pair)))))))
+        (dolist (name (list "block-128k" "empty-block"
+                            "rle-first-block" "zeroSeq_2B"))
+          (check (equalp (%read-octets (fixture (concatenate 'string name ".bin")))
+                         (zstd-decode
+                          (%read-octets
+                           (fixture (concatenate 'string name ".zst")))))))
+        (check (equalp plain (zstd-decode plain-frame)))
+        (check-splits plain-frame plain)
+        (check-splits raw-multiblock-frame raw-multiblock)
+        (let* ((joined-frame (concatenate '(vector (unsigned-byte 8))
+                                          plain-frame plain-frame))
+               (joined-output (concatenate '(vector (unsigned-byte 8))
+                                           plain plain)))
+          (check (equalp joined-output (zstd-decode joined-frame)))
+          (check (decode-at-split joined-frame joined-output
+                                  (length plain-frame))))
+        (let* ((skippable-frame #(95 42 77 24 3 0 0 0 1 2 3))
+               (prefixed (concatenate '(vector (unsigned-byte 8))
+                                      skippable-frame plain-frame)))
+          (check (equalp plain (zstd-decode prefixed)))
+          (check (equalp #() (zstd-decode skippable-frame))))
+        (let ((bad-checksum (copy-seq checksum-frame)))
+          (setf (aref bad-checksum (1- (length bad-checksum)))
+                (logxor (aref bad-checksum (1- (length bad-checksum))) 1))
+          (rejects 'checksum-error (lambda () (zstd-decode bad-checksum))))
+        (rejects 'unsupported-container-error
+                 (lambda ()
+                   (zstd-decode
+                    (%read-octets (fixture "dictionary-id-12345.zst")))))
+        (check (equalp rle-output
+                       (zstd-decode rle-frame
+                                    :max-output-bytes (length rle-output))))
+        (rejects 'zstd-size-limit-exceeded
+                 (lambda ()
+                   (zstd-decode rle-frame
+                                :max-output-bytes (1- (length rle-output)))))
+        (rejects 'zstd-size-limit-exceeded
+                 (lambda ()
+                   (zstd-decode
+                    (%read-octets (fixture "window-9m.zst"))
+                    :max-output-bytes (* 10 1024 1024))))
+        (check (equalp (make-array (* 9 1024 1024)
+                                   :element-type '(unsigned-byte 8)
+                                   :initial-element #x57)
+                       (zstd-decode
+                        (%read-octets (fixture "window-9m.zst"))
+                        :max-output-bytes (* 10 1024 1024)
+                        :max-window-size-bytes (* 9 1024 1024))))
+        (rejects 'zstd-invalid-data
+                 (lambda ()
+                   (zstd-decode (subseq plain-frame 0 (1- (length plain-frame))))))
+        (progn
+          (rejects 'zstd-invalid-data
+                   (lambda () (zstd-decode #(0 0 0 0))))
+          ;; This zero-count run overruns max-symbol 2 in the normalized-count table.
+          (rejects 'zstd-invalid-data
+                   (lambda ()
+                     (deflate-kit::%zstd-parse-fse-table #(0 6) 0 2 2 9))))
+        (let* ((bad-block (copy-seq plain-frame))
+               (offset (first-block-header-offset plain-frame)))
+          (setf (aref bad-block offset)
+                (logior #x06 (logand #xf9 (aref bad-block offset))))
+          (progn
+            (rejects 'zstd-invalid-data
+                     (lambda () (zstd-decode bad-block)))
+            (check
+             (let* ((output (deflate-kit::%make-zstd-output 8))
+                    (data (make-array 4 :element-type '(unsigned-byte 8)
+                                      :adjustable t :fill-pointer 3
+                                      :initial-contents #(17 34 51 0))))
+               (setf (deflate-kit::zstd-output-data output) data)
+               (deflate-kit::%zstd-append-output output #(68) 0 1)
+               (check (and (= 4 (fill-pointer data))
+                           (= 4 (array-total-size data))))
+               (deflate-kit::%zstd-backref-output output 1 3)
+               (equalp #(17 34 51 68 68 68 68)
+                       (subseq (deflate-kit::zstd-output-data output) 0
+                               (fill-pointer (deflate-kit::zstd-output-data output))))))
+            ;; Offset 3 exceeds the two bytes already in output history.
+            (check
+             (let ((output (deflate-kit::%make-zstd-output 8))
+                   (caught nil))
+               (deflate-kit::%zstd-append-output output #(1 2) 0 2)
+               (handler-case
+                   (deflate-kit::%zstd-backref-output output 3 1)
+                 (zstd-invalid-data (condition)
+                   (setf caught condition)))
+               (and (typep caught 'zstd-invalid-data)
+                    (eq :offset-out-of-range
+                        (inflate-error-reason caught))))))))
+    (format t "FR-013 focused tests passed: ~D~%" checks)
+    checks)))
 
 (defun run-tests ()
   (let* ((input (%octets "hello hello hello hello"))
@@ -375,6 +701,12 @@
                        (lambda () (deflate input :sync-flush t)))
     (%assert-condition 'deflate-error
                        (lambda () (deflater-flush (make-deflater) :sync nil)))
-    (progn (%test-gzip-header-padding input second) (run-codec-contract-tests))
+    (progn
+      (%test-gzip-header-padding input second)
+      (run-codec-contract-tests)
+      (progn
+        (%test-zstd-predefined-tables)
+        (%test-zstd-api-contract)
+        (%test-zstd)))
     (format t "FR-002 focused tests passed~%")
     t))

@@ -5,7 +5,7 @@
   :pathname "src" :serial t
   :components ((:file "package") (:file "conditions")
                (:file "checksums") (:file "inflate") (:file "deflate")
-               (:file "zlib") (:file "gzip") (:file "compat")
+               (:file "zlib") (:file "gzip") (:file "zstd") (:file "compat")
                (:file "brotli-dictionary") (:file "brotli"))
   :in-order-to ((test-op (test-op "cl-deflate-kit/test"))))
 (asdf:defsystem "cl-deflate-kit/test"

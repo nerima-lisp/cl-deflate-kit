@@ -6,6 +6,7 @@
    #:deflate-input-limit #:deflate-input-limit-limit
    #:inflate-invalid-data #:inflate-error-reason #:inflate-error-detail
    #:inflate-size-limit-exceeded #:inflate-error-observed
+   #:zstd-invalid-data #:zstd-size-limit-exceeded #:zstd-input-limit-exceeded
    #:invalid-container-error #:unsupported-container-error #:checksum-error
    #:deflate-error-format #:deflate-error-reason
    #:invalid-compression-level #:invalid-compression-level-level
@@ -21,12 +22,13 @@
    #:gzip-member-header-fname #:gzip-member-header-fcomment
    #:gzip-member-header-fhcrc
    #:zlib-encode #:zlib-decode #:zlib-compress #:zlib-decompress
-   #:crc32 #:adler32 #:register-raw-codecs
+   #:zstd-decode #:crc32 #:adler32 #:register-raw-codecs
    #:make-deflater #:deflater-write #:deflater-flush #:deflater-finish
    #:deflater-output #:deflater-level
    #:make-inflate-stream #:inflate-stream-push #:inflate-stream-finish
    #:make-deflate-stream #:deflate-stream-push #:deflate-stream-flush
    #:deflate-stream-finish
+   #:make-zstd-stream #:zstd-stream-push #:zstd-stream-finish
    #:brotli-decode #:make-brotli-stream
    #:brotli-stream-push #:brotli-stream-finish #:brotli-invalid-data
    #:brotli-size-limit-exceeded #:brotli-input-limit-exceeded))
