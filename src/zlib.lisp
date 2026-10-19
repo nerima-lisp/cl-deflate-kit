@@ -24,14 +24,25 @@
     (declare (ignore consumed))
     (%octets result)))
 
-(defun %inflate-raw (data &key (start 0) end max-output-bytes window-size)
+(defun %inflate-raw
+    (data &key (start 0) end max-output-bytes window-size unbounded truncate-at)
   (or *raw-inflate-function*
       (%container-error :inflate "no raw inflate codec has been registered"))
-  (let ((input (%octets data)))
+  (let* ((input (%octets data))
+         (arguments (append (list :start start)
+                            (when end (list :end end))
+                            (when (not (null max-output-bytes))
+                              (list :max-output-bytes max-output-bytes))
+                            (when window-size (list :window-size window-size))
+                            (when unbounded (list :unbounded t))
+                            (when (not (null truncate-at))
+                              (list :truncate-at truncate-at)))))
     (multiple-value-bind (result consumed)
-      (funcall *raw-inflate-function* input :start start :end end
-                 :max-output-bytes max-output-bytes :window-size window-size)
-      (values (%octets result) (or consumed (- (or end (length input)) start))))))
+        (apply *raw-inflate-function* input arguments)
+      (values (%octets result)
+              (if (and (null consumed) (not (null truncate-at)))
+                  nil
+                  (or consumed (- (or end (length input)) start)))))))
 
 (defun zlib-encode (data &key (level 6))
   "Wrap raw DEFLATE DATA in an RFC 1950 zlib stream."

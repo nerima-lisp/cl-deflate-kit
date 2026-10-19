@@ -10,7 +10,8 @@
    #:invalid-compression-level #:invalid-compression-level-level
    #:deflater-finished-error
    #:inflate #:deflate
-   #:gzip-encode #:gzip-decode #:gzip-compress #:gzip-decompress
+   #:gzip-encode #:gzip-decode #:gzip-member-header-at #:gzip-decode-prefix
+   #:gzip-compress #:gzip-decompress
    #:gzip-member-header #:gzip-member-header-p
    #:gzip-member-header-flags #:gzip-member-header-mtime
    #:gzip-member-header-xfl #:gzip-member-header-extra-flags
