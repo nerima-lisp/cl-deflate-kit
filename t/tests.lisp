@@ -375,6 +375,6 @@
                        (lambda () (deflate input :sync-flush t)))
     (%assert-condition 'deflate-error
                        (lambda () (deflater-flush (make-deflater) :sync nil)))
-    (%test-gzip-header-padding input second)
+    (progn (%test-gzip-header-padding input second) (run-codec-contract-tests))
     (format t "FR-002 focused tests passed~%")
     t))
