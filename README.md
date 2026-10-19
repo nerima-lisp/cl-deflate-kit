@@ -1,9 +1,9 @@
 # cl-deflate-kit
 
 Pure Common Lisp implementations of RFC 1951 DEFLATE, RFC 1950 zlib, and RFC
-1952 gzip, with RFC 7932 Brotli decompression. The public package is
-`deflate-kit`. It has no Lisp dependencies and supports bounded decompression,
-checksums, one-shot APIs, and stream APIs.
+1952 gzip, plus RFC 7932 Brotli and RFC 8878 Zstandard decompression. The public
+package is `deflate-kit`. It has no Lisp dependencies and supports bounded
+decompression, checksums, one-shot APIs, and stream APIs.
 
 This README describes the current source tree. The changelog marks changes that
 have not yet appeared in a tagged release.
@@ -48,10 +48,13 @@ The limit keywords differ by API:
 | `zlib-decode` | `:max-output-bytes`, `:max-output` |
 | `brotli-decode` | `:max-output-bytes`, `:max-output`, `:unbounded` |
 | `make-brotli-stream` | `:max-output-bytes`, `:max-output`, `:unbounded`, `:max-input-bytes` |
+| `zstd-decode` | `:max-output-bytes`, `:max-output`, `:unbounded`, `:max-input-bytes`, `:max-window-size-bytes` |
+| `make-zstd-stream` | `:max-output-bytes`, `:max-output`, `:unbounded`, `:max-input-bytes`, `:max-window-size-bytes` |
 
-All APIs except `gzip-decode-prefix` default to a 16 MiB output limit. The gzip
-limit applies to the aggregate output of all decoded members. `gzip-decode`
-also accepts `:allow-trailing-padding`, which defaults to `NIL`.
+`inflate`, gzip, zlib, and Brotli APIs default to a 16 MiB output limit;
+Zstandard APIs default to 8 MiB. `gzip-decode-prefix` requires `:max-output`.
+The gzip limit applies to the aggregate output of all decoded members.
+`gzip-decode` also accepts `:allow-trailing-padding`, which defaults to `NIL`.
 
 `brotli-decode` accepts an octet vector and returns decoded octets. For chunked
 input, `make-brotli-stream` creates the stream state. Pass octet-vector chunks
@@ -61,6 +64,21 @@ output and stream input limits default to 16 MiB. `:max-input-bytes` bounds the
 compressed bytes retained by a Brotli stream. `:max-output` aliases
 `:max-output-bytes`; specify only one. Pass `:unbounded t` to disable the output
 limit; it cannot be combined with an output-limit keyword.
+
+`zstd-decode` accepts an octet vector and returns decoded octets. For chunked
+input, `make-zstd-stream` creates the stream state. `zstd-stream-push` copies
+each octet-vector chunk before retaining it; call `zstd-stream-finish` to decode
+the chunks. Zstandard input limits default to 16 MiB, and
+`:max-window-size-bytes` defaults to 8 MiB. Both APIs accept a larger explicit
+value. For HTTP `zstd` content coding, set `:max-window-size-bytes` to 8 MiB.
+RFC 9659 §3 requires decoders to support window sizes through 8 MiB, and §4 says
+decoders need to fail on oversized frames.
+`:max-output` aliases `:max-output-bytes`; specify only one. Pass `:unbounded t`
+to disable the output limit; it cannot be combined with an output-limit keyword.
+When present, `deflate-error-position` is a zero-based byte offset into the
+compressed input.
+`checksum-error` uses the first checksum byte; an `unsupported-container-error`
+for a dictionary ID uses the first dictionary-ID byte.
 
 `gzip-decode` returns the concatenated decoded octets from all members as its
 primary value and a list of `gzip-member-header` structures as its second
