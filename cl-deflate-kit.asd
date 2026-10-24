@@ -1,7 +1,7 @@
 (in-package #:asdf-user)
 (asdf:defsystem "cl-deflate-kit"
-  :description "Pure Common Lisp DEFLATE, zlib, gzip, and Brotli codecs."
-  :version "0.3.0" :license "MIT" :author "nerima-lisp"
+  :description "Pure Common Lisp DEFLATE, zlib, and gzip codecs with Brotli and Zstandard decompression."
+  :version "0.4.0" :license "MIT" :author "nerima-lisp"
   :pathname "src" :serial t
   :components ((:file "package") (:file "conditions")
                (:file "checksums") (:file "inflate") (:file "deflate")
