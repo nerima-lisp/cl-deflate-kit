@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0
+
 - Add the public Brotli decoder API: `brotli-decode`, `make-brotli-stream`,
   `brotli-stream-push`, and `brotli-stream-finish`.
 - Support `:max-output-bytes`, its `:max-output` alias, `:max-input-bytes`, and
@@ -11,6 +13,15 @@
   `brotli-size-limit-exceeded`, and compressed-input overflow as
   `brotli-input-limit-exceeded`. Their readers and parent conditions are listed
   in the README.
+- Add the public Zstandard decoder API: `zstd-decode`, `make-zstd-stream`,
+  `zstd-stream-push`, and `zstd-stream-finish`.
+- Support `:max-output-bytes`, its `:max-output` alias, `:max-input-bytes`,
+  `:max-window-size-bytes`, and `:unbounded` for Zstandard decoding.
+- Require Zstandard output, input, and window limits to be nonnegative integers.
+- Report the failing byte position for Zstandard checksum and unsupported
+  dictionary-ID errors.
+- Reduce overhead in Zstandard bitstream decoding, Brotli bit reading, and
+  Brotli reference decoding.
 
 ## 0.3.0
 
